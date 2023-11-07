@@ -2,6 +2,16 @@
 name = "rustyrmm-server"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/mtelahun/rusty-rmm"
+license = "BSD-2-Clause"
+description = "RustyRMM server daemon"
+keywords = ["grpc", "network", "server"]
+categories = ["os"]
+readme = "README.md"
+
+[package.metadata.wix]
+upgrade-guid = "D64353A9-640B-4B56-AC83-D92E65A72605"
+path-guid = "55BD66B4-393D-4F83-B454-23E20F7334E6"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
