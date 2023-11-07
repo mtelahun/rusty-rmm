@@ -184,15 +184,15 @@ impl ResponseStatus {
     }
 }
 /// Generated client implementations.
-pub mod management_client {
+pub mod endpoint_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::http::Uri;
     use tonic::codegen::*;
     #[derive(Debug, Clone)]
-    pub struct ManagementClient<T> {
+    pub struct EndpointClient<T> {
         inner: tonic::client::Grpc<T>,
     }
-    impl ManagementClient<tonic::transport::Channel> {
+    impl EndpointClient<tonic::transport::Channel> {
         /// Attempt to create a new client by connecting to a given endpoint.
         pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
         where
@@ -203,7 +203,7 @@ pub mod management_client {
             Ok(Self::new(conn))
         }
     }
-    impl<T> ManagementClient<T>
+    impl<T> EndpointClient<T>
     where
         T: tonic::client::GrpcService<tonic::body::BoxBody>,
         T::Error: Into<StdError>,
@@ -221,7 +221,7 @@ pub mod management_client {
         pub fn with_interceptor<F>(
             inner: T,
             interceptor: F,
-        ) -> ManagementClient<InterceptedService<T, F>>
+        ) -> EndpointClient<InterceptedService<T, F>>
         where
             F: tonic::service::Interceptor,
             T::ResponseBody: Default,
@@ -234,7 +234,7 @@ pub mod management_client {
             <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
                 Into<StdError> + Send + Sync,
         {
-            ManagementClient::new(InterceptedService::new(inner, interceptor))
+            EndpointClient::new(InterceptedService::new(inner, interceptor))
         }
         /// Compress requests with the given encoding.
         ///
@@ -280,11 +280,11 @@ pub mod management_client {
             })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/rustyrmm.endpoint.Management/RegisterEndpoint",
+                "/rustyrmm.endpoint.Endpoint/RegisterEndpoint",
             );
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new(
-                "rustyrmm.endpoint.Management",
+                "rustyrmm.endpoint.Endpoint",
                 "RegisterEndpoint",
             ));
             self.inner.unary(req, path, codec).await
@@ -301,12 +301,11 @@ pub mod management_client {
                 )
             })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/rustyrmm.endpoint.Management/UpdateEndpoint",
-            );
+            let path =
+                http::uri::PathAndQuery::from_static("/rustyrmm.endpoint.Endpoint/UpdateEndpoint");
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new(
-                "rustyrmm.endpoint.Management",
+                "rustyrmm.endpoint.Endpoint",
                 "UpdateEndpoint",
             ));
             self.inner.unary(req, path, codec).await
@@ -314,12 +313,12 @@ pub mod management_client {
     }
 }
 /// Generated server implementations.
-pub mod management_server {
+pub mod endpoint_server {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with ManagementServer.
+    /// Generated trait containing gRPC methods that should be implemented for use with EndpointServer.
     #[async_trait]
-    pub trait Management: Send + Sync + 'static {
+    pub trait Endpoint: Send + Sync + 'static {
         async fn register_endpoint(
             &self,
             request: tonic::Request<super::EndpointRegistration>,
@@ -330,7 +329,7 @@ pub mod management_server {
         ) -> std::result::Result<tonic::Response<super::EndpointUpdateResponse>, tonic::Status>;
     }
     #[derive(Debug)]
-    pub struct ManagementServer<T: Management> {
+    pub struct EndpointServer<T: Endpoint> {
         inner: _Inner<T>,
         accept_compression_encodings: EnabledCompressionEncodings,
         send_compression_encodings: EnabledCompressionEncodings,
@@ -338,7 +337,7 @@ pub mod management_server {
         max_encoding_message_size: Option<usize>,
     }
     struct _Inner<T>(Arc<T>);
-    impl<T: Management> ManagementServer<T> {
+    impl<T: Endpoint> EndpointServer<T> {
         pub fn new(inner: T) -> Self {
             Self::from_arc(Arc::new(inner))
         }
@@ -387,9 +386,9 @@ pub mod management_server {
             self
         }
     }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for ManagementServer<T>
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for EndpointServer<T>
     where
-        T: Management,
+        T: Endpoint,
         B: Body + Send + 'static,
         B::Error: Into<StdError> + Send + 'static,
     {
@@ -405,10 +404,10 @@ pub mod management_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/rustyrmm.endpoint.Management/RegisterEndpoint" => {
+                "/rustyrmm.endpoint.Endpoint/RegisterEndpoint" => {
                     #[allow(non_camel_case_types)]
-                    struct RegisterEndpointSvc<T: Management>(pub Arc<T>);
-                    impl<T: Management> tonic::server::UnaryService<super::EndpointRegistration>
+                    struct RegisterEndpointSvc<T: Endpoint>(pub Arc<T>);
+                    impl<T: Endpoint> tonic::server::UnaryService<super::EndpointRegistration>
                         for RegisterEndpointSvc<T>
                     {
                         type Response = super::EndpointRegistrationResponse;
@@ -419,7 +418,7 @@ pub mod management_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as Management>::register_endpoint(&inner, request).await
+                                <T as Endpoint>::register_endpoint(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -447,10 +446,10 @@ pub mod management_server {
                     };
                     Box::pin(fut)
                 }
-                "/rustyrmm.endpoint.Management/UpdateEndpoint" => {
+                "/rustyrmm.endpoint.Endpoint/UpdateEndpoint" => {
                     #[allow(non_camel_case_types)]
-                    struct UpdateEndpointSvc<T: Management>(pub Arc<T>);
-                    impl<T: Management> tonic::server::UnaryService<super::EndpointUpdate> for UpdateEndpointSvc<T> {
+                    struct UpdateEndpointSvc<T: Endpoint>(pub Arc<T>);
+                    impl<T: Endpoint> tonic::server::UnaryService<super::EndpointUpdate> for UpdateEndpointSvc<T> {
                         type Response = super::EndpointUpdateResponse;
                         type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
@@ -459,7 +458,7 @@ pub mod management_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as Management>::update_endpoint(&inner, request).await
+                                <T as Endpoint>::update_endpoint(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -498,7 +497,7 @@ pub mod management_server {
             }
         }
     }
-    impl<T: Management> Clone for ManagementServer<T> {
+    impl<T: Endpoint> Clone for EndpointServer<T> {
         fn clone(&self) -> Self {
             let inner = self.inner.clone();
             Self {
@@ -510,7 +509,7 @@ pub mod management_server {
             }
         }
     }
-    impl<T: Management> Clone for _Inner<T> {
+    impl<T: Endpoint> Clone for _Inner<T> {
         fn clone(&self) -> Self {
             Self(Arc::clone(&self.0))
         }
@@ -520,7 +519,7 @@ pub mod management_server {
             write!(f, "{:?}", self.0)
         }
     }
-    impl<T: Management> tonic::server::NamedService for ManagementServer<T> {
-        const NAME: &'static str = "rustyrmm.endpoint.Management";
+    impl<T: Endpoint> tonic::server::NamedService for EndpointServer<T> {
+        const NAME: &'static str = "rustyrmm.endpoint.Endpoint";
     }
 }

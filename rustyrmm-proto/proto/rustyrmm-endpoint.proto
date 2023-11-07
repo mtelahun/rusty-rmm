@@ -1,7 +1,7 @@
 syntax = "proto3";
 package rustyrmm.endpoint;
 
-service Management {
+service Endpoint {
     rpc RegisterEndpoint(EndpointRegistration) returns (EndpointRegistrationResponse);
     rpc UpdateEndpoint(EndpointUpdate) returns (EndpointUpdateResponse);
 }
