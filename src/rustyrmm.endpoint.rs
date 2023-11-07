@@ -186,8 +186,8 @@ impl ResponseStatus {
 /// Generated client implementations.
 pub mod management_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
-    use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    use tonic::codegen::*;
     #[derive(Debug, Clone)]
     pub struct ManagementClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -231,9 +231,8 @@ pub mod management_client {
                     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
                 >,
             >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::BoxBody>,
-            >>::Error: Into<StdError> + Send + Sync,
+            <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
+                Into<StdError> + Send + Sync,
         {
             ManagementClient::new(InterceptedService::new(inner, interceptor))
         }
@@ -271,55 +270,45 @@ pub mod management_client {
         pub async fn register_endpoint(
             &mut self,
             request: impl tonic::IntoRequest<super::EndpointRegistration>,
-        ) -> std::result::Result<
-            tonic::Response<super::EndpointRegistrationResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::EndpointRegistrationResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
                 "/rustyrmm.endpoint.Management/RegisterEndpoint",
             );
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("rustyrmm.endpoint.Management", "RegisterEndpoint"),
-                );
+            req.extensions_mut().insert(GrpcMethod::new(
+                "rustyrmm.endpoint.Management",
+                "RegisterEndpoint",
+            ));
             self.inner.unary(req, path, codec).await
         }
         pub async fn update_endpoint(
             &mut self,
             request: impl tonic::IntoRequest<super::EndpointUpdate>,
-        ) -> std::result::Result<
-            tonic::Response<super::EndpointUpdateResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::EndpointUpdateResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
                 "/rustyrmm.endpoint.Management/UpdateEndpoint",
             );
             let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("rustyrmm.endpoint.Management", "UpdateEndpoint"),
-                );
+            req.extensions_mut().insert(GrpcMethod::new(
+                "rustyrmm.endpoint.Management",
+                "UpdateEndpoint",
+            ));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -334,17 +323,11 @@ pub mod management_server {
         async fn register_endpoint(
             &self,
             request: tonic::Request<super::EndpointRegistration>,
-        ) -> std::result::Result<
-            tonic::Response<super::EndpointRegistrationResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::EndpointRegistrationResponse>, tonic::Status>;
         async fn update_endpoint(
             &self,
             request: tonic::Request<super::EndpointUpdate>,
-        ) -> std::result::Result<
-            tonic::Response<super::EndpointUpdateResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::EndpointUpdateResponse>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct ManagementServer<T: Management> {
@@ -369,10 +352,7 @@ pub mod management_server {
                 max_encoding_message_size: None,
             }
         }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
+        pub fn with_interceptor<F>(inner: T, interceptor: F) -> InterceptedService<Self, F>
         where
             F: tonic::service::Interceptor,
         {
@@ -428,15 +408,11 @@ pub mod management_server {
                 "/rustyrmm.endpoint.Management/RegisterEndpoint" => {
                     #[allow(non_camel_case_types)]
                     struct RegisterEndpointSvc<T: Management>(pub Arc<T>);
-                    impl<
-                        T: Management,
-                    > tonic::server::UnaryService<super::EndpointRegistration>
-                    for RegisterEndpointSvc<T> {
+                    impl<T: Management> tonic::server::UnaryService<super::EndpointRegistration>
+                        for RegisterEndpointSvc<T>
+                    {
                         type Response = super::EndpointRegistrationResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::EndpointRegistration>,
@@ -474,15 +450,9 @@ pub mod management_server {
                 "/rustyrmm.endpoint.Management/UpdateEndpoint" => {
                     #[allow(non_camel_case_types)]
                     struct UpdateEndpointSvc<T: Management>(pub Arc<T>);
-                    impl<
-                        T: Management,
-                    > tonic::server::UnaryService<super::EndpointUpdate>
-                    for UpdateEndpointSvc<T> {
+                    impl<T: Management> tonic::server::UnaryService<super::EndpointUpdate> for UpdateEndpointSvc<T> {
                         type Response = super::EndpointUpdateResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::EndpointUpdate>,
@@ -517,18 +487,14 @@ pub mod management_server {
                     };
                     Box::pin(fut)
                 }
-                _ => {
-                    Box::pin(async move {
-                        Ok(
-                            http::Response::builder()
-                                .status(200)
-                                .header("grpc-status", "12")
-                                .header("content-type", "application/grpc")
-                                .body(empty_body())
-                                .unwrap(),
-                        )
-                    })
-                }
+                _ => Box::pin(async move {
+                    Ok(http::Response::builder()
+                        .status(200)
+                        .header("grpc-status", "12")
+                        .header("content-type", "application/grpc")
+                        .body(empty_body())
+                        .unwrap())
+                }),
             }
         }
     }

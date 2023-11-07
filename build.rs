@@ -6,7 +6,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build_server(true)
         .build_transport(true)
         .out_dir("./src")
-        .compile(&["proto/rustyrmm-endpoint.proto"], &["./proto", "/usr/local/include/google"])?;
+        .compile(
+            &["proto/rustyrmm-endpoint.proto"],
+            &["./proto", "/usr/local/include/google"],
+        )?;
 
     Ok(())
 }
