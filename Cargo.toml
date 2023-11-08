@@ -6,6 +6,10 @@ members = [
     "rustyrmm-agent"
 ]
 
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+
 # Config for 'cargo dist'
 [workspace.metadata.dist]
 # The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
