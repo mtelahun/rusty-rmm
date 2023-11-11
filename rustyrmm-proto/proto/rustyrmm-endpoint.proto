@@ -1,7 +1,7 @@
 syntax = "proto3";
-package rustyrmm.endpoint;
+package endpoint_registration;
 
-service Endpoint {
+service RegistrationService {
     rpc RegisterEndpoint(EndpointRegistration) returns (EndpointRegistrationResponse);
     rpc UpdateEndpoint(EndpointUpdate) returns (EndpointUpdateResponse);
 }
@@ -38,14 +38,20 @@ message OsInfo {
 }
 
 message CpuInfo {
-    string family = 1;
-    string model = 2;
-    uint32 core_count = 3;
-    uint32 thread_count = 4;
+    uint32 core_count = 1;
+    uint32 thread_count = 2;
+    repeated Cpu cpus = 3;
+}
+
+message Cpu {
+    string name = 1;
+    string vendor_id = 2;
+    string brand = 3;
+    string frequency = 4;
 }
 
 message MemInfo {
-    string total = 1;
+    uint64 total = 1;
     uint64 used = 2;
 }
 
@@ -53,11 +59,19 @@ message DiskInfo {
     repeated Disk disks = 1;
 }
 
+enum DiskType {
+    TYPE_UNKNOWN = 0;
+    TYPE_HDD = 1;
+    TYPE_SSD = 2;
+}
+
 message Disk {
     string name = 1;
-    uint64 size = 2;
-    uint64 used = 3;
-    float io_usage = 4;
+    DiskType disk_type = 2;
+    string filesystem = 3;
+    string mount_point = 4;
+    uint64 size = 5;
+    uint64 free = 6;
 }
 
 message NetInfo {
@@ -97,11 +111,11 @@ enum ResponseStatus {
 
 message EndpointRegistrationResponse {
     ResponseStatus status = 1;
-    string system_uuid = 2;
-    RustyRmmId id = 3;
+    RustyRmmId id = 2;
 }
 
 message EndpointUpdateResponse {
     ResponseStatus status = 1;
     RustyRmmId id = 2;
+    uint32 updated = 3;
 }

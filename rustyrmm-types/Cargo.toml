@@ -1,0 +1,12 @@
+[package]
+name = "rustyrmm-types"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+postgres-types = { version = "0.2.6", features = ["derive", "with-uuid-1"] }
+serde = "1.0.192"
+serde_json = "1.0.108"
+uuid = { version = "1.5.0", features = ["v4"] }

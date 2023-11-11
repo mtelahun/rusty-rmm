@@ -3,7 +3,8 @@ resolver = "2"
 members = [
     "rustyrmm-proto",
     "rustyrmm-server",
-    "rustyrmm-agent"
+    "rustyrmm-agent",
+    "rustyrmm-types",
 ]
 
 [workspace.metadata.release]

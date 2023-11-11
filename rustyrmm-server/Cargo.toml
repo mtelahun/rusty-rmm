@@ -16,6 +16,13 @@ path-guid = "55BD66B4-393D-4F83-B454-23E20F7334E6"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+clap = { version = "4.4.7", features = ["derive"] }
+mobc = "0.8.3"
+mobc-postgres = { version = "0.8.0", features = ["with-chrono-0_4"] }
+postgres-types = { version = "0.2.6", features = ["derive", "with-uuid-1"] }
 rustyrmm-proto = {path = "../rustyrmm-proto"}
+rustyrmm-types = {path = "../rustyrmm-types"}
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7.10", features = ["with-chrono-0_4", "with-uuid-1"] }
 tonic = "0.10.2"
+uuid = { version = "1.5.0", features = ["v4"] }

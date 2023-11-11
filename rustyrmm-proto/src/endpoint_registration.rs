@@ -55,20 +55,30 @@ pub struct OsInfo {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuInfo {
-    #[prost(string, tag = "1")]
-    pub family: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub model: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "3")]
+    #[prost(uint32, tag = "1")]
     pub core_count: u32,
-    #[prost(uint32, tag = "4")]
+    #[prost(uint32, tag = "2")]
     pub thread_count: u32,
+    #[prost(message, repeated, tag = "3")]
+    pub cpus: ::prost::alloc::vec::Vec<Cpu>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Cpu {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub vendor_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub brand: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub frequency: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MemInfo {
-    #[prost(string, tag = "1")]
-    pub total: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "1")]
+    pub total: u64,
     #[prost(uint64, tag = "2")]
     pub used: u64,
 }
@@ -83,12 +93,16 @@ pub struct DiskInfo {
 pub struct Disk {
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "2")]
+    #[prost(enumeration = "DiskType", tag = "2")]
+    pub disk_type: i32,
+    #[prost(string, tag = "3")]
+    pub filesystem: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub mount_point: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
     pub size: u64,
-    #[prost(uint64, tag = "3")]
-    pub used: u64,
-    #[prost(float, tag = "4")]
-    pub io_usage: f32,
+    #[prost(uint64, tag = "6")]
+    pub free: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -141,9 +155,7 @@ pub struct ClientVer {
 pub struct EndpointRegistrationResponse {
     #[prost(enumeration = "ResponseStatus", tag = "1")]
     pub status: i32,
-    #[prost(string, tag = "2")]
-    pub system_uuid: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     pub id: ::core::option::Option<RustyRmmId>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -153,6 +165,37 @@ pub struct EndpointUpdateResponse {
     pub status: i32,
     #[prost(message, optional, tag = "2")]
     pub id: ::core::option::Option<RustyRmmId>,
+    #[prost(uint32, tag = "3")]
+    pub updated: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DiskType {
+    TypeUnknown = 0,
+    TypeHdd = 1,
+    TypeSsd = 2,
+}
+impl DiskType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            DiskType::TypeUnknown => "TYPE_UNKNOWN",
+            DiskType::TypeHdd => "TYPE_HDD",
+            DiskType::TypeSsd => "TYPE_SSD",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TYPE_UNKNOWN" => Some(Self::TypeUnknown),
+            "TYPE_HDD" => Some(Self::TypeHdd),
+            "TYPE_SSD" => Some(Self::TypeSsd),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -184,15 +227,15 @@ impl ResponseStatus {
     }
 }
 /// Generated client implementations.
-pub mod endpoint_client {
+pub mod registration_service_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::http::Uri;
     use tonic::codegen::*;
     #[derive(Debug, Clone)]
-    pub struct EndpointClient<T> {
+    pub struct RegistrationServiceClient<T> {
         inner: tonic::client::Grpc<T>,
     }
-    impl EndpointClient<tonic::transport::Channel> {
+    impl RegistrationServiceClient<tonic::transport::Channel> {
         /// Attempt to create a new client by connecting to a given endpoint.
         pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
         where
@@ -203,7 +246,7 @@ pub mod endpoint_client {
             Ok(Self::new(conn))
         }
     }
-    impl<T> EndpointClient<T>
+    impl<T> RegistrationServiceClient<T>
     where
         T: tonic::client::GrpcService<tonic::body::BoxBody>,
         T::Error: Into<StdError>,
@@ -221,7 +264,7 @@ pub mod endpoint_client {
         pub fn with_interceptor<F>(
             inner: T,
             interceptor: F,
-        ) -> EndpointClient<InterceptedService<T, F>>
+        ) -> RegistrationServiceClient<InterceptedService<T, F>>
         where
             F: tonic::service::Interceptor,
             T::ResponseBody: Default,
@@ -234,7 +277,7 @@ pub mod endpoint_client {
             <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
                 Into<StdError> + Send + Sync,
         {
-            EndpointClient::new(InterceptedService::new(inner, interceptor))
+            RegistrationServiceClient::new(InterceptedService::new(inner, interceptor))
         }
         /// Compress requests with the given encoding.
         ///
@@ -280,11 +323,11 @@ pub mod endpoint_client {
             })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/rustyrmm.endpoint.Endpoint/RegisterEndpoint",
+                "/endpoint_registration.RegistrationService/RegisterEndpoint",
             );
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new(
-                "rustyrmm.endpoint.Endpoint",
+                "endpoint_registration.RegistrationService",
                 "RegisterEndpoint",
             ));
             self.inner.unary(req, path, codec).await
@@ -301,11 +344,12 @@ pub mod endpoint_client {
                 )
             })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path =
-                http::uri::PathAndQuery::from_static("/rustyrmm.endpoint.Endpoint/UpdateEndpoint");
+            let path = http::uri::PathAndQuery::from_static(
+                "/endpoint_registration.RegistrationService/UpdateEndpoint",
+            );
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new(
-                "rustyrmm.endpoint.Endpoint",
+                "endpoint_registration.RegistrationService",
                 "UpdateEndpoint",
             ));
             self.inner.unary(req, path, codec).await
@@ -313,12 +357,12 @@ pub mod endpoint_client {
     }
 }
 /// Generated server implementations.
-pub mod endpoint_server {
+pub mod registration_service_server {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with EndpointServer.
+    /// Generated trait containing gRPC methods that should be implemented for use with RegistrationServiceServer.
     #[async_trait]
-    pub trait Endpoint: Send + Sync + 'static {
+    pub trait RegistrationService: Send + Sync + 'static {
         async fn register_endpoint(
             &self,
             request: tonic::Request<super::EndpointRegistration>,
@@ -329,7 +373,7 @@ pub mod endpoint_server {
         ) -> std::result::Result<tonic::Response<super::EndpointUpdateResponse>, tonic::Status>;
     }
     #[derive(Debug)]
-    pub struct EndpointServer<T: Endpoint> {
+    pub struct RegistrationServiceServer<T: RegistrationService> {
         inner: _Inner<T>,
         accept_compression_encodings: EnabledCompressionEncodings,
         send_compression_encodings: EnabledCompressionEncodings,
@@ -337,7 +381,7 @@ pub mod endpoint_server {
         max_encoding_message_size: Option<usize>,
     }
     struct _Inner<T>(Arc<T>);
-    impl<T: Endpoint> EndpointServer<T> {
+    impl<T: RegistrationService> RegistrationServiceServer<T> {
         pub fn new(inner: T) -> Self {
             Self::from_arc(Arc::new(inner))
         }
@@ -386,9 +430,9 @@ pub mod endpoint_server {
             self
         }
     }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for EndpointServer<T>
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for RegistrationServiceServer<T>
     where
-        T: Endpoint,
+        T: RegistrationService,
         B: Body + Send + 'static,
         B::Error: Into<StdError> + Send + 'static,
     {
@@ -404,10 +448,11 @@ pub mod endpoint_server {
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             let inner = self.inner.clone();
             match req.uri().path() {
-                "/rustyrmm.endpoint.Endpoint/RegisterEndpoint" => {
+                "/endpoint_registration.RegistrationService/RegisterEndpoint" => {
                     #[allow(non_camel_case_types)]
-                    struct RegisterEndpointSvc<T: Endpoint>(pub Arc<T>);
-                    impl<T: Endpoint> tonic::server::UnaryService<super::EndpointRegistration>
+                    struct RegisterEndpointSvc<T: RegistrationService>(pub Arc<T>);
+                    impl<T: RegistrationService>
+                        tonic::server::UnaryService<super::EndpointRegistration>
                         for RegisterEndpointSvc<T>
                     {
                         type Response = super::EndpointRegistrationResponse;
@@ -418,7 +463,7 @@ pub mod endpoint_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as Endpoint>::register_endpoint(&inner, request).await
+                                <T as RegistrationService>::register_endpoint(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -446,10 +491,12 @@ pub mod endpoint_server {
                     };
                     Box::pin(fut)
                 }
-                "/rustyrmm.endpoint.Endpoint/UpdateEndpoint" => {
+                "/endpoint_registration.RegistrationService/UpdateEndpoint" => {
                     #[allow(non_camel_case_types)]
-                    struct UpdateEndpointSvc<T: Endpoint>(pub Arc<T>);
-                    impl<T: Endpoint> tonic::server::UnaryService<super::EndpointUpdate> for UpdateEndpointSvc<T> {
+                    struct UpdateEndpointSvc<T: RegistrationService>(pub Arc<T>);
+                    impl<T: RegistrationService> tonic::server::UnaryService<super::EndpointUpdate>
+                        for UpdateEndpointSvc<T>
+                    {
                         type Response = super::EndpointUpdateResponse;
                         type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
@@ -458,7 +505,7 @@ pub mod endpoint_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as Endpoint>::update_endpoint(&inner, request).await
+                                <T as RegistrationService>::update_endpoint(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -497,7 +544,7 @@ pub mod endpoint_server {
             }
         }
     }
-    impl<T: Endpoint> Clone for EndpointServer<T> {
+    impl<T: RegistrationService> Clone for RegistrationServiceServer<T> {
         fn clone(&self) -> Self {
             let inner = self.inner.clone();
             Self {
@@ -509,7 +556,7 @@ pub mod endpoint_server {
             }
         }
     }
-    impl<T: Endpoint> Clone for _Inner<T> {
+    impl<T: RegistrationService> Clone for _Inner<T> {
         fn clone(&self) -> Self {
             Self(Arc::clone(&self.0))
         }
@@ -519,7 +566,7 @@ pub mod endpoint_server {
             write!(f, "{:?}", self.0)
         }
     }
-    impl<T: Endpoint> tonic::server::NamedService for EndpointServer<T> {
-        const NAME: &'static str = "rustyrmm.endpoint.Endpoint";
+    impl<T: RegistrationService> tonic::server::NamedService for RegistrationServiceServer<T> {
+        const NAME: &'static str = "endpoint_registration.RegistrationService";
     }
 }
