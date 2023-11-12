@@ -1,5 +1,7 @@
 use machine_uid::machine_id;
-use rustyrmm_proto::endpoint_registration::{CpuInfo, Disk, DiskInfo, DiskType, MemInfo, OsInfo};
+use rustyrmm_proto::endpoint_registration::{
+    CpuInfo, Disk, DiskInfo, DiskType, Ip4Addr, Ip6Addr, MemInfo, NetInfo, NetInterface, OsInfo,
+};
 use rustyrmm_types::{data::OsInfoInternal, ids::MachineId};
 use sysinfo::{CpuExt, DiskExt, NetworkExt, ProcessExt, System, SystemExt};
 use time::{format_description, UtcOffset};
@@ -18,12 +20,6 @@ pub fn refresh_system(sys: &mut System) {
 }
 
 pub fn get_hostname(sys: &System) -> Result<String, String> {
-    // We display all disks' information:
-    println!("=> disks:");
-    for disk in sys.disks() {
-        println!("{:?}", disk);
-    }
-
     // Network interfaces name, data received and data transmitted:
     println!("=> networks:");
     for (interface_name, data) in sys.networks() {
@@ -120,4 +116,18 @@ pub fn get_disk(sys: &System) -> DiskInfo {
     }
 
     DiskInfo { disks }
+}
+
+pub fn get_network(sys: &System) -> NetInfo {
+    let mut ifs = Vec::<NetInterface>::new();
+    for (if_name, if_data) in sys.networks() {
+        ifs.push(NetInterface {
+            name: if_name.to_string(),
+            mac: if_data.mac_address().to_string(),
+            ip4: Vec::<Ip4Addr>::new(),
+            ip6: Vec::<Ip6Addr>::new(),
+        })
+    }
+
+    NetInfo { ifs }
 }

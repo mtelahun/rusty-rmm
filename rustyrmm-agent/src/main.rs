@@ -8,7 +8,8 @@ use sysinfo::System;
 use crate::{
     error::AgentError,
     system_info::{
-        get_cpu, get_disk, get_hostname, get_memory, get_os, get_system_id, init_system,
+        get_cpu, get_disk, get_hostname, get_memory, get_network, get_os, get_system_id,
+        init_system,
     },
 };
 
@@ -54,7 +55,7 @@ async fn main() -> Result<(), AgentError> {
         cpu: Some(get_cpu(&state.system)),
         memory: Some(get_memory(&state.system)),
         disks: Some(get_disk(&state.system)),
-        ips: todo!(),
+        net: Some(get_network(&state.system)),
         updates: todo!(),
         client_version: Some(ClientVer {
             version: String::from(VERSION),

@@ -24,7 +24,7 @@ pub struct EndpointUpdate {
     #[prost(message, optional, tag = "7")]
     pub disks: ::core::option::Option<DiskInfo>,
     #[prost(message, optional, tag = "8")]
-    pub ips: ::core::option::Option<NetInfo>,
+    pub net: ::core::option::Option<NetInfo>,
     #[prost(message, optional, tag = "9")]
     pub updates: ::core::option::Option<UpdateStatus>,
     #[prost(message, optional, tag = "10")]
@@ -115,10 +115,8 @@ pub struct NetInfo {
 pub struct NetInterface {
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
-    #[prost(uint64, tag = "2")]
-    pub capacity: u64,
-    #[prost(float, tag = "3")]
-    pub utilization: f32,
+    #[prost(string, tag = "2")]
+    pub mac: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
     pub ip4: ::prost::alloc::vec::Vec<Ip4Addr>,
     #[prost(message, repeated, tag = "5")]

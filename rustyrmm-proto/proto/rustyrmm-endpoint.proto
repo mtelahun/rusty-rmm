@@ -19,7 +19,7 @@ message EndpointUpdate {
     CpuInfo cpu = 5;
     MemInfo memory = 6;
     DiskInfo disks = 7;
-    NetInfo ips = 8;
+    NetInfo net = 8;
     UpdateStatus updates = 9;
     ClientVer client_version = 10;
 }
@@ -80,8 +80,7 @@ message NetInfo {
 
 message NetInterface {
     string name = 1;
-    uint64 capacity = 2;
-    float utilization = 3;
+    string mac = 2;
     repeated Ip4Addr ip4 = 4;
     repeated Ip6Addr ip6 = 5;
 }
