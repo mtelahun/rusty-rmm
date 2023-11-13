@@ -3,15 +3,9 @@ use rustyrmm_proto::endpoint_registration::{
     registration_service_client::RegistrationServiceClient, ClientVer, EndpointRegistration,
     EndpointUpdate, RustyRmmId,
 };
-use sysinfo::System;
+use system_info::SystemInformation;
 
-use crate::{
-    error::AgentError,
-    system_info::{
-        get_cpu, get_disk, get_hostname, get_memory, get_network, get_os, get_system_id,
-        init_system,
-    },
-};
+use crate::error::AgentError;
 
 mod error;
 mod system_info;
@@ -35,10 +29,14 @@ async fn main() -> Result<(), AgentError> {
     let mut client =
         RegistrationServiceClient::connect(format!("http://{}:{}", cli.server, cli.port)).await?;
     let state = State::new();
+    let system = &state.system;
 
     let request = tonic::Request::new(EndpointRegistration {
-        hostname: get_hostname(&state.system).map_err(AgentError::Internal)?,
-        system_uuid: get_system_id().map_err(AgentError::Internal)?.to_string(),
+        hostname: system.get_hostname().map_err(AgentError::Internal)?,
+        system_uuid: system
+            .get_system_id()
+            .map_err(AgentError::Internal)?
+            .to_string(),
     });
 
     let response = client.register_endpoint(request).await?;
@@ -49,14 +47,17 @@ async fn main() -> Result<(), AgentError> {
 
     let request = tonic::Request::new(EndpointUpdate {
         id: Some(id),
-        hostname: get_hostname(&state.system).map_err(AgentError::Internal)?,
-        system_uuid: get_system_id().map_err(AgentError::Internal)?.to_string(),
-        os: Some(get_os(&state.system).map_err(AgentError::Internal)?),
-        cpu: Some(get_cpu(&state.system)),
-        memory: Some(get_memory(&state.system)),
-        disks: Some(get_disk(&state.system)),
-        net: Some(get_network(&state.system)),
-        updates: todo!(),
+        hostname: system.get_hostname().map_err(AgentError::Internal)?,
+        system_uuid: system
+            .get_system_id()
+            .map_err(AgentError::Internal)?
+            .to_string(),
+        os: Some(system.get_os().map_err(AgentError::Internal)?),
+        cpu: Some(system.get_cpu()),
+        memory: Some(system.get_memory()),
+        disks: Some(system.get_disk()),
+        net: Some(system.get_network()),
+        updates: Some(system.get_update()),
         client_version: Some(ClientVer {
             version: String::from(VERSION),
         }),
@@ -70,13 +71,13 @@ async fn main() -> Result<(), AgentError> {
 
 #[derive(Debug, Default)]
 struct State {
-    system: System,
+    system: SystemInformation,
 }
 
 impl State {
     fn new() -> State {
         Self {
-            system: init_system(),
+            system: SystemInformation::new(),
         }
     }
 }
