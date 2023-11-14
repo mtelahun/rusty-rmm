@@ -8,6 +8,6 @@ RustyRMM - the Open Source Remote Management and Monitoring Server
 Usage: rustyrmm-server [OPTIONS]
 
 OPTIONS:
--s, --server                 IP address to bind to [default: 0.0.0.0]
+-s, --server                 IP address to bind to [default: 127.0.0.1]
 -p, --port                   The TCP port to listen on [default: 50052]
 ```

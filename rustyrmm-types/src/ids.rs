@@ -31,34 +31,6 @@ impl Deref for AssetId {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
-#[postgres(name = "systemuuid")]
-pub struct SystemUuid(uuid::Uuid);
-
-impl SystemUuid {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-
-    pub fn try_parse(value: &str) -> Result<SystemUuid, Box<dyn Error>> {
-        Ok(Self(Uuid::try_parse(value)?))
-    }
-}
-
-impl std::fmt::Display for SystemUuid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Deref for SystemUuid {
-    type Target = uuid::Uuid;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 #[derive(Debug, Default, ToSql, FromSql)]
 #[postgres(name = "machineid")]
 pub struct MachineId(String);
@@ -80,5 +52,53 @@ impl Deref for MachineId {
 impl From<String> for MachineId {
     fn from(value: String) -> Self {
         Self(value)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
+#[postgres(name = "cpuid")]
+pub struct CpuId(i32);
+
+impl CpuId {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Display for CpuId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for CpuId {
+    type Target = i32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
+#[postgres(name = "cpuid")]
+pub struct DiskId(i32);
+
+impl DiskId {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Display for DiskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for DiskId {
+    type Target = i32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }

@@ -12,8 +12,8 @@ const DB_POOL_MAX_OPEN: u64 = 32;
 const DB_POOL_MAX_IDLE: u64 = 8;
 const DB_POOL_TIMEOUT_SECONDS: u64 = 15;
 
-pub fn create_pool(db_str: &str) -> Result<DBPool, mobc::Error<Error>> {
-    let config = Config::from_str(db_str)?;
+pub fn create_pool(database_url: &str) -> Result<DBPool, mobc::Error<Error>> {
+    let config = Config::from_str(database_url)?;
 
     let manager = PgConnectionManager::new(config, NoTls);
     Ok(Pool::builder()

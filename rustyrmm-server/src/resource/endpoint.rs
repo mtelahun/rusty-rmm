@@ -5,9 +5,7 @@ use rustyrmm_types::{
     registration_state::RegistrationState,
 };
 
-pub trait Resource {
-    const NAME: &'static str;
-}
+use super::Resource;
 
 #[derive(Debug, Default)]
 pub struct Endpoint {

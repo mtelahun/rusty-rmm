@@ -12,7 +12,7 @@ use rustyrmm_proto::endpoint_registration::{
 
 use crate::db::{DBCon, DBPool};
 use crate::orm;
-use crate::resource::Endpoint;
+use crate::resource::endpoint::Endpoint;
 
 pub struct EndPt {
     db_pool: DBPool,
@@ -63,8 +63,9 @@ impl RegistrationService for EndPt {
 
     async fn update_endpoint(
         &self,
-        _request: Request<EndpointUpdate>,
+        request: Request<EndpointUpdate>,
     ) -> Result<Response<EndpointUpdateResponse>, Status> {
+        let _request = request.into_inner();
         todo!()
     }
 }
