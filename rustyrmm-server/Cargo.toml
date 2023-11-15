@@ -26,6 +26,7 @@ rustyrmm-proto = {path = "../rustyrmm-proto"}
 rustyrmm-types = {path = "../rustyrmm-types"}
 secrecy = { version = "0.8.0", features = ["serde"] }
 serde = { version = "1.0.192", features = ["derive"] }
+sqlx = { version = "0.7.2", features = ["runtime-tokio-rustls", "rust_decimal", "postgres", "uuid"] }
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
 tokio-postgres = { version = "0.7.10", features = ["with-chrono-0_4", "with-uuid-1"] }
 tonic = "0.10.2"
@@ -33,4 +34,3 @@ uuid = { version = "1.5.0", features = ["v4"] }
 
 [dev-dependencies]
 lazy_static = "1.4.0"
-sqlx = { version = "0.7.2", features = ["runtime-tokio-rustls", "rust_decimal", "postgres", "uuid"] }

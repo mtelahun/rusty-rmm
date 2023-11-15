@@ -1,12 +1,16 @@
 use postgres_types::{FromSql, ToSql};
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, ToSql, FromSql)]
+#[derive(
+    sqlx::Type, Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, ToSql, FromSql,
+)]
 #[postgres(name = "registrationstate")]
+#[sqlx(type_name = "registrationstate")]
+#[sqlx(rename_all = "lowercase")]
 pub enum RegistrationState {
+    #[default]
     #[postgres(name = "new")]
     New,
     #[postgres(name = "upd")]
-    #[default]
     Upd,
 }
 

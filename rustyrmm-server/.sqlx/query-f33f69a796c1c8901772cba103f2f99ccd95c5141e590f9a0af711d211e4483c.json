@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, hostname, system_id, reg_state FROM endpoint",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "hostname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "system_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "reg_state",
+        "type_info": {
+          "Custom": {
+            "name": "registrationstate",
+            "kind": {
+              "Enum": [
+                "new",
+                "upd"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f33f69a796c1c8901772cba103f2f99ccd95c5141e590f9a0af711d211e4483c"
+}

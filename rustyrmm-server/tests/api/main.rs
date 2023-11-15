@@ -2,3 +2,4 @@
 extern crate lazy_static;
 
 mod helpers;
+mod registration;

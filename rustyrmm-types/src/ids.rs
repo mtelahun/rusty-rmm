@@ -1,10 +1,14 @@
 use std::{error::Error, ops::Deref};
 
 use postgres_types::{FromSql, ToSql};
+use rustyrmm_proto::endpoint_registration::RustyRmmId;
 use uuid::Uuid;
 
-#[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
+#[derive(
+    sqlx::Type, Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql,
+)]
 #[postgres(name = "assetid")]
+#[sqlx(type_name = "AssetId")]
 pub struct AssetId(uuid::Uuid);
 
 impl AssetId {
@@ -31,8 +35,15 @@ impl Deref for AssetId {
     }
 }
 
-#[derive(Debug, Default, ToSql, FromSql)]
+impl From<RustyRmmId> for AssetId {
+    fn from(value: RustyRmmId) -> Self {
+        Self(Uuid::parse_str(value.uuid.as_str()).unwrap_or_default())
+    }
+}
+
+#[derive(sqlx::Type, Debug, Default, ToSql, FromSql)]
 #[postgres(name = "machineid")]
+#[sqlx(type_name = "MachineId")]
 pub struct MachineId(String);
 
 impl std::fmt::Display for MachineId {
