@@ -1,14 +1,15 @@
 -- Add migration script here
 CREATE DOMAIN AssetId AS UUID;
-CREATE DOMAIN MachineId AS TEXT;
 CREATE DOMAIN CpuId as INTEGER;
 CREATE DOMAIN DiskId as INTEGER;
+CREATE DOMAIN IfId as INTEGER;
 CREATE TYPE RegistrationState AS ENUM('new', 'upd');
 CREATE TYPE DiskType AS ENUM('unknown', 'hdd', 'ssd');
 
 CREATE TABLE endpoint (
     id AssetId NOT NULL,
-    system_id MachineId,
+    system_serial_number TEXT,
+    system_sku_number TEXT,
     hostname TEXT,
     reg_state RegistrationState NOT NULL,
     PRIMARY KEY(id)
@@ -22,6 +23,7 @@ CREATE TABLE os_info (
     virt_system TEXT,
     virt_role TEXT,
     tz TEXT,
+    machine_id TEXT,
     PRIMARY KEY(id),
     CONSTRAINT fk_endpoint_id
         FOREIGN KEY(id)
@@ -82,4 +84,51 @@ CREATE TABLE disk (
     CONSTRAINT fk_disk_info_id
         FOREIGN KEY(disk_info_id)
             REFERENCES disk_info(id)
+);
+
+CREATE TABLE net_info (
+    id AssetId NOT NULL,
+    PRIMARY KEY(id)
+);
+
+CREATE TABLE net_if (
+    net_info_id AssetId NOT NULL,
+    if_id IfId NOT NULL,
+    name TEXT NOT NULL,
+    mac TEXT,
+    IP4 TEXT,
+    IP6 TEXT,
+    PRIMARY KEY(net_info_id, if_id),
+    CONSTRAINT fk_net_info_id
+        FOREIGN KEY(net_info_id)
+            REFERENCES net_info(id)
+);
+
+CREATE TABLE endpoint_detail (
+    id AssetId NOT NULL,
+    hostname TEXT,
+    system_serial_number TEXT,
+    system_sku_number TEXT,
+    client_ver TEXT,
+    os_info_id AssetId,
+    cpu_info_id AssetId,
+    disk_info_id AssetId,
+    mem_info_id AssetId,
+    net_info_id AssetId,
+    PRIMARY KEY(id),
+    CONSTRAINT fk_os_info_id
+        FOREIGN KEY(os_info_id)
+            REFERENCES os_info(id),
+    CONSTRAINT fk_cpu_info_id
+        FOREIGN KEY(cpu_info_id)
+            REFERENCES cpu_info(id),
+    CONSTRAINT fk_disk_info_id
+        FOREIGN KEY(disk_info_id)
+            REFERENCES disk_info(id),
+    CONSTRAINT fk_mem_info_id
+        FOREIGN KEY(mem_info_id)
+            REFERENCES mem_info(id),
+    CONSTRAINT fk_net_info_id
+        FOREIGN KEY(net_info_id)
+            REFERENCES net_info(id)
 );

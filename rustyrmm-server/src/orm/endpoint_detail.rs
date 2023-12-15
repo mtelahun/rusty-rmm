@@ -10,8 +10,8 @@ pub async fn create(
     detail: EndpointDetail,
 ) -> Result<EndpointDetail, Box<dyn Error>> {
     let statement = format!(
-        "INSERT INTO {} (id, system_id, hostname, os, cpu, disk, mem, net, client_ver)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
+        "INSERT INTO {} (id, hostname, system_serial_number, system_sku_number, client_ver, os_info_id, cpu_info_id, disk_info_id, mem_info_id, net_info_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
         EndpointDetail::NAME,
     );
 
@@ -20,14 +20,15 @@ pub async fn create(
             &statement,
             &[
                 &detail.id,
-                &detail.machine_id,
                 &detail.hostname,
+                &detail.system_serial_number,
+                &detail.system_sku_number,
+                &detail.client_ver,
                 &detail.os,
                 &detail.cpu,
                 &detail.disk,
                 &detail.mem,
                 &detail.net,
-                &detail.client_ver,
             ],
         )
         .await?;

@@ -10,7 +10,7 @@ use crate::error::AgentError;
 mod error;
 mod system_info;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUSTYRMM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(author, version)]
@@ -33,10 +33,8 @@ async fn main() -> Result<(), AgentError> {
 
     let request = tonic::Request::new(EndpointRegistration {
         hostname: system.get_hostname().map_err(AgentError::Internal)?,
-        system_uuid: system
-            .get_system_id()
-            .map_err(AgentError::Internal)?
-            .to_string(),
+        system_serial_number: "SERIAL".to_string(),
+        system_sku_number: "SKU".to_string(),
     });
 
     let response = client.register_endpoint(request).await?;
@@ -48,10 +46,8 @@ async fn main() -> Result<(), AgentError> {
     let request = tonic::Request::new(EndpointUpdate {
         id: Some(id),
         hostname: system.get_hostname().map_err(AgentError::Internal)?,
-        system_uuid: system
-            .get_system_id()
-            .map_err(AgentError::Internal)?
-            .to_string(),
+        system_serial_number: "SERIAL".to_string(),
+        system_sku_number: "SKU".to_string(),
         os: Some(system.get_os().map_err(AgentError::Internal)?),
         cpu: Some(system.get_cpu()),
         memory: Some(system.get_memory()),
@@ -59,7 +55,7 @@ async fn main() -> Result<(), AgentError> {
         net: Some(system.get_network()),
         updates: Some(system.get_update()),
         client_version: Some(ClientVer {
-            version: String::from(VERSION),
+            version: String::from(RUSTYRMM_VERSION),
         }),
     });
 

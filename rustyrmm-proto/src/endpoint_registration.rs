@@ -4,7 +4,9 @@ pub struct EndpointRegistration {
     #[prost(string, tag = "1")]
     pub hostname: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub system_uuid: ::prost::alloc::string::String,
+    pub system_sku_number: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub system_serial_number: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -14,20 +16,22 @@ pub struct EndpointUpdate {
     #[prost(string, tag = "2")]
     pub hostname: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub system_uuid: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
-    pub os: ::core::option::Option<OsInfo>,
+    pub system_sku_number: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub system_serial_number: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
-    pub cpu: ::core::option::Option<CpuInfo>,
+    pub os: ::core::option::Option<OsInfo>,
     #[prost(message, optional, tag = "6")]
-    pub memory: ::core::option::Option<MemInfo>,
+    pub cpu: ::core::option::Option<CpuInfo>,
     #[prost(message, optional, tag = "7")]
-    pub disks: ::core::option::Option<DiskInfo>,
+    pub memory: ::core::option::Option<MemInfo>,
     #[prost(message, optional, tag = "8")]
-    pub net: ::core::option::Option<NetInfo>,
+    pub disks: ::core::option::Option<DiskInfo>,
     #[prost(message, optional, tag = "9")]
-    pub updates: ::core::option::Option<UpdateStatus>,
+    pub net: ::core::option::Option<NetInfo>,
     #[prost(message, optional, tag = "10")]
+    pub updates: ::core::option::Option<UpdateStatus>,
+    #[prost(message, optional, tag = "11")]
     pub client_version: ::core::option::Option<ClientVer>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -46,11 +50,15 @@ pub struct OsInfo {
     #[prost(string, tag = "3")]
     pub version: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
-    pub virt_system: ::prost::alloc::string::String,
+    pub kernel_version: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
-    pub virt_role: ::prost::alloc::string::String,
+    pub virt_system: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
+    pub virt_role: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
     pub tz: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub machine_id: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

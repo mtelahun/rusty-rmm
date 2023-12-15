@@ -6,6 +6,7 @@ pub struct OsInfoInternal {
     pub virt_system: String,
     pub virt_role: String,
     pub tz: String,
+    pub machine_id: String,
 }
 
 impl OsInfoInternal {

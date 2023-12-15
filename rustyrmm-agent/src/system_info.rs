@@ -48,12 +48,12 @@ impl SystemInformation {
         Ok(self.sys.host_name().unwrap_or(String::from("")))
     }
 
-    pub fn get_system_id(&self) -> Result<MachineId, String> {
+    pub fn get_system_id(&self) -> MachineId {
         let id = match machine_id::get_machine_id() {
             Ok(id) => id,
             _ => String::from_utf8([0u8; 16].to_vec()).unwrap(),
         };
-        Ok(MachineId::from(id))
+        MachineId::from(id)
     }
 
     pub fn get_os(&self) -> Result<OsInfo, String> {
@@ -70,15 +70,18 @@ impl SystemInformation {
             virt_system: STR_UNKNOWN.to_string(),
             virt_role: STR_UNKNOWN.to_string(),
             tz: local_offset,
+            machine_id: self.get_system_id().to_string(),
         };
 
         Ok(OsInfo {
             full_name: info.full_name(),
             family: info.os_family(),
             version: info.os_ver,
+            kernel_version: info.kernel_ver,
             virt_system: info.virt_system,
             virt_role: info.virt_role,
             tz: info.tz,
+            machine_id: info.machine_id,
         })
     }
 

@@ -1,14 +1,15 @@
 use tokio_postgres::Row;
 
-use rustyrmm_types::ids::{AssetId, MachineId};
+use rustyrmm_types::ids::AssetId;
 
 use super::Resource;
 
 #[derive(Debug, Default)]
 pub struct EndpointDetail {
     pub id: AssetId,
-    pub machine_id: MachineId,
     pub hostname: String,
+    pub system_sku_number: String,
+    pub system_serial_number: String,
     pub os: AssetId,
     pub cpu: AssetId,
     pub mem: AssetId,
@@ -25,8 +26,9 @@ impl From<Row> for EndpointDetail {
     fn from(value: Row) -> Self {
         Self {
             id: value.get("id"),
-            machine_id: value.get("system_id"),
             hostname: value.get("hostname"),
+            system_serial_number: value.get("system_serial_number"),
+            system_sku_number: value.get("system_sku_number"),
             os: value.get("os"),
             cpu: value.get("cpu"),
             mem: value.get("mem"),

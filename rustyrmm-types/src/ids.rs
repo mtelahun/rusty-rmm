@@ -42,8 +42,8 @@ impl From<RustyRmmId> for AssetId {
 }
 
 #[derive(sqlx::Type, Debug, Default, ToSql, FromSql)]
-#[postgres(name = "machineid")]
 #[sqlx(type_name = "MachineId")]
+#[postgres(transparent)]
 pub struct MachineId(String);
 
 impl std::fmt::Display for MachineId {
@@ -90,8 +90,14 @@ impl Deref for CpuId {
     }
 }
 
+impl From<i32> for CpuId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
-#[postgres(name = "cpuid")]
+#[postgres(name = "diskid")]
 pub struct DiskId(i32);
 
 impl DiskId {
@@ -111,5 +117,41 @@ impl Deref for DiskId {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl From<i32> for DiskId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, Hash, Eq, PartialEq, PartialOrd, Ord, ToSql, FromSql)]
+#[postgres(name = "ifid")]
+pub struct IfId(i32);
+
+impl IfId {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Display for IfId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Deref for IfId {
+    type Target = i32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<i32> for IfId {
+    fn from(value: i32) -> Self {
+        Self(value)
     }
 }

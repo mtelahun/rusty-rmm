@@ -7,7 +7,7 @@ use crate::{
 
 pub async fn create(db_con: DBCon, asset: Endpoint) -> Result<Endpoint, Box<dyn Error>> {
     let statement = format!(
-        "INSERT INTO {} (id, system_id, hostname, reg_state) VALUES ($1, $2, $3, $4) RETURNING *",
+        "INSERT INTO {} (id, system_serial_number, system_sku_number, hostname, reg_state) VALUES ($1, $2, $3, $4, $5::RegistrationState) RETURNING *",
         Endpoint::NAME,
     );
 
@@ -16,7 +16,8 @@ pub async fn create(db_con: DBCon, asset: Endpoint) -> Result<Endpoint, Box<dyn 
             &statement,
             &[
                 &asset.id,
-                &asset.machine_id,
+                &asset.system_serial_number,
+                &asset.system_sku_number,
                 &asset.hostname,
                 &asset.reg_state,
             ],

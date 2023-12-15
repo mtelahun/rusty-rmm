@@ -8,20 +8,22 @@ service RegistrationService {
 
 message EndpointRegistration {
     string hostname = 1;
-    string system_uuid = 2;
+    string system_sku_number = 2;
+    string system_serial_number = 3;
 }
 
 message EndpointUpdate {
     RustyRmmId id = 1;
     string hostname = 2;
-    string system_uuid = 3;
-    OsInfo os = 4;
-    CpuInfo cpu = 5;
-    MemInfo memory = 6;
-    DiskInfo disks = 7;
-    NetInfo net = 8;
-    UpdateStatus updates = 9;
-    ClientVer client_version = 10;
+    string system_sku_number = 3;
+    string system_serial_number = 4;
+    OsInfo os = 5;
+    CpuInfo cpu = 6;
+    MemInfo memory = 7;
+    DiskInfo disks = 8;
+    NetInfo net = 9;
+    UpdateStatus updates = 10;
+    ClientVer client_version = 11;
 }
 
 message RustyRmmId {
@@ -32,9 +34,11 @@ message OsInfo {
     string full_name = 1;
     string family = 2;
     string version = 3;
-    string virt_system = 4;
-    string virt_role = 5;
-    string tz = 6;
+    string kernel_version = 4;
+    string virt_system = 5;
+    string virt_role = 6;
+    string tz = 7;
+    string machine_id = 8;
 }
 
 message CpuInfo {
