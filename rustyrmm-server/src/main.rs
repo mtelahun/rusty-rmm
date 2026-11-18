@@ -1,7 +1,15 @@
+mod agent_service;
+mod ca;
 mod db;
 mod operators;
+mod pairing;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
 
 #[derive(Parser)]
 #[command(version, about = "RustyRMM Server")]
@@ -15,6 +23,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the Server.
+    Serve {
+        /// Address for the Agent port (mTLS).
+        #[arg(long, default_value = "0.0.0.0:7443")]
+        agent_listen: SocketAddr,
+        /// DNS names or IPs Agents use to reach the Agent port (repeatable).
+        #[arg(long = "agent-name", required = true)]
+        agent_names: Vec<String>,
+        /// Directory for the CA certificate and its root-only key.
+        #[arg(long, default_value = "/var/lib/rustyrmm")]
+        state_dir: PathBuf,
+    },
     /// Manage Operators (run on the Server host).
     Operator {
         #[command(subcommand)]
@@ -36,6 +56,27 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("set --database-url or DATABASE_URL"))?;
 
     match cli.command {
+        Command::Serve {
+            agent_listen,
+            agent_names,
+            state_dir,
+        } => {
+            let pool = db::connect(&database_url).await?;
+            let ca = Arc::new(ca::Ca::load_or_create(&state_dir)?);
+            println!(
+                "Agent CA fingerprint (SHA-256): {}",
+                ca.fingerprint_sha256()
+            );
+            println!("Agent port listening on {agent_listen}");
+            tonic::transport::Server::builder()
+                .tls_config(agent_service::tls_config(&ca, agent_names)?)?
+                .add_service(AgentServiceServer::new(agent_service::AgentApi {
+                    pool,
+                    ca,
+                }))
+                .serve(agent_listen)
+                .await?;
+        }
         Command::Operator {
             command: OperatorCommand::Add { username },
         } => {
