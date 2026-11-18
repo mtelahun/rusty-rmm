@@ -83,7 +83,7 @@ pub async fn record_result(
     };
     sqlx::query(
         "UPDATE commands SET status = $3, exit_code = $4, stdout = $5, stderr = $6,
-                truncated = $7, started_at = $8, finished_at = $9
+                truncated = $7, started_at = $8, finished_at = $9, timed_out = $10
          WHERE id = $1 AND endpoint_id = $2 AND status <> $3",
     )
     .bind(id)
@@ -95,6 +95,7 @@ pub async fn record_result(
     .bind(result.truncated)
     .bind(crate::ingest::agent_time(result.started_at.as_ref()))
     .bind(crate::ingest::agent_time(result.finished_at.as_ref()))
+    .bind(result.timed_out)
     .execute(pool)
     .await?;
     Ok(())

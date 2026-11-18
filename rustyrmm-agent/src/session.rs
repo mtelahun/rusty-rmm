@@ -1,18 +1,22 @@
 //! `rustyrmm-agent run`: keep a Session open with the Server, reconnecting with backoff.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rcgen::{CertificateParams, KeyPair};
 use rustyrmm_proto::agent::v1::agent_service_client::AgentServiceClient;
 use rustyrmm_proto::agent::v1::{
-    agent_message, server_message, AgentMessage, Heartbeat, Hello, RenewCertificateRequest,
+    agent_message, server_message, AgentMessage, Heartbeat, Hello, ProcessList,
+    RenewCertificateRequest,
 };
 use tokio::sync::mpsc;
 use tokio::time::{interval, sleep, Instant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
+use crate::commands::{self, Outbox};
 use crate::pairing::host;
 use crate::state::Paired;
 use crate::telemetry;
@@ -30,12 +34,14 @@ const STABLE_SESSION: Duration = Duration::from_secs(60);
 /// Runs forever, keeping a Session open. Returns only if the Agent is not paired.
 pub async fn run(dir: &Path) -> anyhow::Result<()> {
     Paired::load(dir)?; // Fail fast if not paired.
+                        // Outlives each Session, so results finished while disconnected are resent.
+    let outbox = Arc::new(Outbox::default());
     let mut backoff = BACKOFF_MIN;
     loop {
         let started = Instant::now();
         // Reload each time: the certificate may have been renewed.
         let result = match Paired::load(dir) {
-            Ok(paired) => session_once(&paired).await,
+            Ok(paired) => session_once(&paired, &outbox).await,
             Err(e) => Err(e),
         };
         match result {
@@ -70,7 +76,7 @@ pub async fn connect(paired: &Paired) -> anyhow::Result<Channel> {
 
 /// One Session: Hello, then heartbeats at the Server's interval, until the stream ends.
 /// Returns Ok when the Server closes the Session cleanly.
-pub async fn session_once(paired: &Paired) -> anyhow::Result<()> {
+pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Result<()> {
     let mut client = AgentServiceClient::new(connect(paired).await?);
     let (tx, rx) = mpsc::channel(16);
     tx.send(message(agent_message::Message::Hello(Hello {
@@ -108,12 +114,16 @@ pub async fn session_once(paired: &Paired) -> anyhow::Result<()> {
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await; // The first tick is immediate; Hello just went out.
     let mut renew_check = interval(RENEW_CHECK_EVERY);
+    // Results already sent in this Session; everything else retained gets (re)sent.
+    let mut sent: HashSet<String> = HashSet::new();
+    send_new_results(&tx, outbox, &mut sent).await?;
 
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 tx.send(message(agent_message::Message::Heartbeat(Heartbeat {}))).await?;
             }
+            _ = outbox.added.notified() => send_new_results(&tx, outbox, &mut sent).await?,
             _ = renew_check.tick() => {
                 if let Err(e) = renew_if_due(&mut client, paired, RENEW_WITHIN).await {
                     eprintln!("certificate renewal failed (will retry): {e:#}");
@@ -122,12 +132,22 @@ pub async fn session_once(paired: &Paired) -> anyhow::Result<()> {
             msg = inbound.message() => match msg? {
                 None => return Ok(()),
                 Some(msg) => match msg.message {
-                    // shortcut: Commands and process lists are handled by
-                    // Task: Agent Commands and process lists; until then they are ignored.
-                    Some(server_message::Message::Command(_))
-                    | Some(server_message::Message::ProcessListRequest(_))
-                    | Some(server_message::Message::HelloAck(_))
-                    | None => {}
+                    // Commands outlive the Session: results go to the outbox, not this stream.
+                    Some(server_message::Message::Command(cmd)) => {
+                        let (dir, outbox) = (paired.dir.clone(), outbox.clone());
+                        tokio::spawn(async move { outbox.push(commands::run(&dir, cmd).await) });
+                    }
+                    Some(server_message::Message::ProcessListRequest(req)) => {
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let Ok(processes) = tokio::task::spawn_blocking(telemetry::process_list).await else {
+                                return;
+                            };
+                            let list = ProcessList { request_id: req.request_id, processes };
+                            let _ = tx.send(message(agent_message::Message::ProcessList(list))).await;
+                        });
+                    }
+                    Some(server_message::Message::HelloAck(_)) | None => {}
                 },
             },
         }
@@ -162,6 +182,20 @@ fn expires_within(cert_pem: &str, window: Duration) -> anyhow::Result<bool> {
     let (_, cert) = x509_parser::parse_x509_certificate(&der)?;
     let remaining = cert.validity().time_to_expiration();
     Ok(remaining.is_none_or(|left| left.unsigned_abs() < window))
+}
+
+async fn send_new_results(
+    tx: &mpsc::Sender<AgentMessage>,
+    outbox: &Outbox,
+    sent: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    for result in outbox.retained() {
+        if sent.insert(result.id.clone()) {
+            tx.send(message(agent_message::Message::CommandResult(result)))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
