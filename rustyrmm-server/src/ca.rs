@@ -93,14 +93,17 @@ impl Ca {
             .distinguished_name
             .push(DnType::CommonName, endpoint_id.to_string());
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        let serial = new_serial();
-        params.serial_number = Some(SerialNumber::from_slice(&serial));
+        params.serial_number = Some(SerialNumber::from_slice(&new_serial()));
         let (not_before, not_after) = set_leaf_validity(&mut params);
         let signed = CertificateSigningRequestParams {
             params,
             public_key: csr.public_key,
         }
         .signed_by(&self.issuer)?;
+        // Record the serial as encoded in the certificate (DER drops a leading 0x00 byte), since
+        // that is what the Agent presents and `authenticated_endpoint` looks up.
+        let (_, cert) = x509_parser::parse_x509_certificate(signed.der())?;
+        let serial = cert.raw_serial().to_vec();
         Ok(IssuedCert {
             pem: signed.pem(),
             serial,
@@ -177,5 +180,26 @@ mod tests {
         assert_eq!(cn.as_str().unwrap(), id.to_string());
         assert!(cert.subject_alternative_name().unwrap().is_none());
         assert_eq!(cert.raw_serial(), issued.serial.as_slice());
+    }
+
+    #[test]
+    fn recorded_serial_matches_the_certificate_for_every_leading_byte() {
+        // Regression: a serial starting with 0x00 loses that byte in DER, so the bytes we
+        // generated differed from what the Agent later presents (~1 in 128 certificates).
+        let dir = tempfile::tempdir().unwrap();
+        let ca = Ca::load_or_create(dir.path()).unwrap();
+        let agent_key = KeyPair::generate().unwrap();
+        let csr = CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .serialize_request(&agent_key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        for _ in 0..1000 {
+            let issued = ca.sign_agent_csr(&csr, Uuid::now_v7()).unwrap();
+            let der = pem::parse(&issued.pem).unwrap().into_contents();
+            let (_, cert) = x509_parser::parse_x509_certificate(&der).unwrap();
+            assert_eq!(cert.raw_serial(), issued.serial.as_slice());
+        }
     }
 }
