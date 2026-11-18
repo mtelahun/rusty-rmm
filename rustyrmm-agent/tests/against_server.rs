@@ -194,3 +194,45 @@ async fn renews_the_certificate_only_when_due(pool: PgPool) {
 fn verifier_rejects_garbage_fingerprint() {
     assert!(tls::PinnedCaVerifier::new("zz").is_err());
 }
+
+#[sqlx::test(migrations = "../rustyrmm-server/migrations")]
+async fn sends_inventory_and_samples_the_server_stores(pool: PgPool) {
+    let settings = Settings {
+        sample_interval: Duration::from_millis(300),
+        ..Settings::default()
+    };
+    let server = start(pool, settings).await;
+    let (dir, ep) = server.pair().await;
+    let path = dir.path().to_path_buf();
+    let agent = tokio::spawn(async move { session::run(&path).await });
+
+    // Inventory includes a real update check, which can take a while.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (samples, inventories, hostname): (i64, i64, String) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM samples WHERE endpoint_id = $1),
+                    (SELECT count(*) FROM inventories WHERE endpoint_id = $1),
+                    (SELECT hostname FROM endpoints WHERE id = $1)",
+        )
+        .bind(ep)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+        if samples >= 2 && inventories == 1 && !hostname.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "samples={samples} inventories={inventories}"
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+    let memory_total: i64 =
+        sqlx::query_scalar("SELECT memory_total_bytes FROM samples WHERE endpoint_id = $1 LIMIT 1")
+            .bind(ep)
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+    assert!(memory_total > 0);
+    agent.abort();
+}
