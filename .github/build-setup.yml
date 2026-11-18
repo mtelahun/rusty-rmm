@@ -1,8 +1,9 @@
 # Runs before dist builds release artifacts: release builds of the Server embed the web UI
 # (rustyrmm-server/build.rs refuses to build without it).
-- uses: actions/setup-node@v4
+- name: Install Node.js
+  uses: actions/setup-node@v4
   with:
     node-version: 24
 - name: Build the web UI
-  run: npm ci && npm run build
-  working-directory: rustyrmm-web
+  # dist's template drops `working-directory`, so point npm at the folder instead.
+  run: npm --prefix rustyrmm-web ci && npm --prefix rustyrmm-web run build
