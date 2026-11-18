@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
-use rustyrmm_server::{agent_service, ca, db, jobs, operators, sessions};
+use rustyrmm_server::{agent_service, ca, db, jobs, operator_service, operators, sessions};
 
 #[derive(Parser)]
 #[command(version, about = "RustyRMM Server")]
@@ -24,9 +24,19 @@ enum Command {
         /// Address for the Agent port (mTLS).
         #[arg(long, default_value = "0.0.0.0:7443")]
         agent_listen: SocketAddr,
-        /// DNS names or IPs Agents use to reach the Agent port (repeatable).
+        /// DNS names or IPs Agents use to reach the Agent port (repeatable). The first one,
+        /// with the Agent port's port, goes into Pairing one-liners.
         #[arg(long = "agent-name", required = true)]
         agent_names: Vec<String>,
+        /// Address for the Operator port (CLI and web UI).
+        #[arg(long, default_value = "0.0.0.0:8443")]
+        operator_listen: SocketAddr,
+        /// PEM certificate chain for the Operator port (from a public CA).
+        #[arg(long)]
+        operator_cert: PathBuf,
+        /// PEM private key for the Operator port's certificate.
+        #[arg(long)]
+        operator_key: PathBuf,
         /// Directory for the CA certificate and its root-only key.
         #[arg(long, default_value = "/var/lib/rustyrmm")]
         state_dir: PathBuf,
@@ -73,6 +83,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve {
             agent_listen,
             agent_names,
+            operator_listen,
+            operator_cert,
+            operator_key,
             state_dir,
             heartbeat_secs,
             offline_after_secs,
@@ -100,8 +113,16 @@ async fn main() -> anyhow::Result<()> {
                 "Agent CA fingerprint (SHA-256): {}",
                 ca.fingerprint_sha256()
             );
-            println!("Agent port listening on {agent_listen}");
-            tonic::transport::Server::builder()
+            let operator_api = operator_service::OperatorApi {
+                pool: pool.clone(),
+                agent_address: format!("{}:{}", agent_names[0], agent_listen.port()),
+                ca_fingerprint: ca.fingerprint_sha256(),
+            };
+            let operator_tls = operator_service::tls_config(
+                &std::fs::read_to_string(&operator_cert)?,
+                &std::fs::read_to_string(&operator_key)?,
+            );
+            let agent_server = tonic::transport::Server::builder()
                 .tls_config(agent_service::tls_config(&ca, agent_names)?)?
                 .add_service(AgentServiceServer::new(agent_service::AgentApi {
                     pool,
@@ -109,8 +130,14 @@ async fn main() -> anyhow::Result<()> {
                     sessions: Default::default(),
                     settings,
                 }))
-                .serve(agent_listen)
-                .await?;
+                .serve(agent_listen);
+            let operator_listener = tokio::net::TcpListener::bind(operator_listen).await?;
+            println!("Agent port listening on {agent_listen}");
+            println!("Operator port listening on {operator_listen}");
+            tokio::try_join!(
+                async { agent_server.await.map_err(anyhow::Error::from) },
+                operator_service::serve(operator_api, operator_tls, operator_listener),
+            )?;
         }
         Command::Operator {
             command: OperatorCommand::Add { username },

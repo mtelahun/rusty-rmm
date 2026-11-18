@@ -40,8 +40,11 @@ time = "0.3.55"
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1.19"
 tonic = { version = "0.14", features = ["tls-ring"] }
+tonic-web = "0.14"
+tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1.29.3", features = ["v7"] }
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+rcgen = "0.14.10"
 tempfile = "3.27.0"
