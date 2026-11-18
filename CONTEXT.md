@@ -27,3 +27,31 @@ _Avoid_: Tenant, organization, group
 **Pairing**:
 Associating a new Endpoint with an Environment by installing the Agent from an Environment-specific link.
 _Avoid_: Enrollment, onboarding
+
+**Session**:
+One Agent's live connection to the Server, from its hello until disconnect. A newer Session for the same Agent replaces the old one.
+_Avoid_: Connection, stream
+
+**Online**:
+The state of an Endpoint whose Agent has a live Session with recent heartbeats.
+_Avoid_: Connected, up
+
+**Command**:
+An Operator's request to run something on an Endpoint, ending in a result.
+_Avoid_: Job, task, action
+
+**Sample**:
+One point-in-time Monitoring measurement from an Endpoint.
+_Avoid_: Metric, datapoint, reading
+
+**Pairing Token**:
+A reusable, expiring secret tied to one Environment that authorizes Pairing. Operators can revoke it.
+_Avoid_: Enrollment key, invite
+
+**Revoked**:
+The state of an Endpoint whose Agent is no longer allowed to open a Session.
+_Avoid_: Disabled, banned, blocked
+
+**Inventory**:
+The descriptive snapshot of an Endpoint: hardware, OS, network and update status. Contrast with a Sample, which is a point-in-time measurement.
+_Avoid_: Endpoint Information, facts, specs
