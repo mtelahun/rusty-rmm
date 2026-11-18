@@ -4,20 +4,29 @@ use std::sync::Arc;
 
 use rustyrmm_proto::agent::v1::agent_service_server::AgentService;
 use rustyrmm_proto::agent::v1::{
-    AgentMessage, PairRequest, PairResponse, RenewCertificateRequest, RenewCertificateResponse,
-    ServerMessage,
+    agent_message, server_message, AgentMessage, HelloAck, PairRequest, PairResponse,
+    RenewCertificateRequest, RenewCertificateResponse, ServerMessage,
 };
 use sqlx::PgPool;
+use tokio::sync::mpsc;
+use tokio::time::{timeout, Instant};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::codegen::BoxStream;
 use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 use crate::ca::{Ca, IssuedCert};
-use crate::pairing;
+use crate::sessions::{Registration, Sessions, Settings};
+use crate::{ingest, pairing};
+
+/// Agents older than this protocol version are refused at Hello.
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
 
 pub struct AgentApi {
     pub pool: PgPool,
     pub ca: Arc<Ca>,
+    pub sessions: Arc<Sessions>,
+    pub settings: Settings,
 }
 
 #[tonic::async_trait]
@@ -68,10 +77,118 @@ impl AgentService for AgentApi {
 
     async fn open_session(
         &self,
-        _req: Request<Streaming<AgentMessage>>,
+        req: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::OpenSessionStream>, Status> {
-        // shortcut: Sessions arrive with Task: Server Sessions and ingestion.
-        Err(Status::unimplemented("Sessions are not implemented yet"))
+        let endpoint_id = authenticated_endpoint(&self.pool, &req).await?;
+        let mut inbound = req.into_inner();
+
+        let first = timeout(self.settings.offline_after, inbound.message()).await;
+        let hello = match first {
+            Ok(Ok(Some(AgentMessage {
+                message: Some(agent_message::Message::Hello(hello)),
+            }))) => hello,
+            _ => {
+                return Err(Status::failed_precondition(
+                    "the first message must be Hello",
+                ))
+            }
+        };
+        if hello.protocol_version < MIN_PROTOCOL_VERSION {
+            return Err(Status::failed_precondition(format!(
+                "protocol version {} is below the minimum {MIN_PROTOCOL_VERSION}; upgrade the Agent",
+                hello.protocol_version
+            )));
+        }
+
+        let (outbound, rx) = mpsc::channel(16);
+        let s = self.settings;
+        let ack = HelloAck {
+            inventory_interval: Some(proto_duration(s.inventory_interval)),
+            sample_interval: Some(proto_duration(s.sample_interval)),
+            heartbeat_interval: Some(proto_duration(s.heartbeat_interval)),
+        };
+        outbound
+            .send(Ok(ServerMessage {
+                message: Some(server_message::Message::HelloAck(ack)),
+            }))
+            .await
+            .map_err(internal)?;
+        ingest::touch_last_seen(&self.pool, endpoint_id)
+            .await
+            .map_err(internal)?;
+
+        // The registry holds the only sender: when the Session is removed or replaced, the
+        // outbound stream ends and the Agent sees its Session close.
+        let registration = self.sessions.register(endpoint_id, outbound);
+        tokio::spawn(run_session(
+            self.pool.clone(),
+            self.sessions.clone(),
+            s,
+            endpoint_id,
+            registration,
+            inbound,
+        ));
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+}
+
+/// Reads one Session's messages until the Agent disconnects, goes silent past `offline_after`,
+/// or the Session is replaced or disconnected.
+async fn run_session(
+    pool: PgPool,
+    sessions: Arc<Sessions>,
+    settings: Settings,
+    endpoint_id: Uuid,
+    registration: Registration,
+    mut inbound: Streaming<AgentMessage>,
+) {
+    let mut last_seen_written = Instant::now();
+    loop {
+        let msg = tokio::select! {
+            _ = registration.close.notified() => break,
+            msg = timeout(settings.offline_after, inbound.message()) => msg,
+        };
+        let msg = match msg {
+            Ok(Ok(Some(msg))) => msg,
+            // Silent too long, stream error, or clean disconnect.
+            _ => break,
+        };
+        if last_seen_written.elapsed() >= settings.last_seen_write_interval {
+            last_seen_written = Instant::now();
+            log_err(ingest::touch_last_seen(&pool, endpoint_id).await);
+        }
+        match msg.message {
+            Some(agent_message::Message::Inventory(inv)) => {
+                log_err(ingest::inventory(&pool, endpoint_id, &inv).await.map(drop))
+            }
+            Some(agent_message::Message::Sample(sample)) => {
+                log_err(ingest::sample(&pool, endpoint_id, &sample).await)
+            }
+            // shortcut: Command results and process lists are handled by
+            // Task: Server Commands and background jobs; until then they are dropped.
+            Some(agent_message::Message::CommandResult(_))
+            | Some(agent_message::Message::ProcessList(_)) => {}
+            // Heartbeats only keep the Session alive; a repeated Hello is ignored.
+            Some(agent_message::Message::Heartbeat(_))
+            | Some(agent_message::Message::Hello(_))
+            | None => {}
+        }
+    }
+    sessions.remove(endpoint_id, registration.id);
+    log_err(ingest::touch_last_seen(&pool, endpoint_id).await);
+}
+
+fn proto_duration(d: std::time::Duration) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        nanos: d.subsec_nanos() as i32,
+    }
+}
+
+fn log_err(r: sqlx::Result<()>) {
+    if let Err(e) = r {
+        // shortcut: stderr until the Server adopts structured logging.
+        eprintln!("session storage error: {e}");
     }
 }
 
@@ -172,11 +289,17 @@ mod tests {
         addr: std::net::SocketAddr,
         ca_pem: String,
         environment_id: Uuid,
+        sessions: Arc<Sessions>,
         _dir: tempfile::TempDir,
     }
 
-    /// Runs the Agent port with real TLS on a random local port.
     async fn start(pool: PgPool) -> Harness {
+        start_with(pool, Settings::default()).await
+    }
+
+    /// Runs the Agent port with real TLS on a random local port.
+    async fn start_with(pool: PgPool, settings: Settings) -> Harness {
+        let sessions = Arc::new(Sessions::default());
         let dir = tempfile::tempdir().unwrap();
         let ca = Arc::new(Ca::load_or_create(dir.path()).unwrap());
         let tls = tls_config(&ca, vec!["localhost".into()]).unwrap();
@@ -186,6 +309,8 @@ mod tests {
         let api = AgentApi {
             pool: pool.clone(),
             ca,
+            sessions: sessions.clone(),
+            settings,
         };
         tokio::spawn(
             tonic::transport::Server::builder()
@@ -205,6 +330,7 @@ mod tests {
             addr,
             ca_pem,
             environment_id,
+            sessions,
             _dir: dir,
         }
     }
@@ -371,5 +497,217 @@ mod tests {
             renew(h.client(Some(identity)).await).await,
             tonic::Code::Unauthenticated
         );
+    }
+
+    // --- Sessions ---
+
+    use rustyrmm_proto::agent::v1::{Heartbeat, Hello};
+    use rustyrmm_proto::common::v1::{InterfaceSample, Inventory, Sample};
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn msg(m: agent_message::Message) -> AgentMessage {
+        AgentMessage { message: Some(m) }
+    }
+
+    fn hello(protocol_version: u32) -> AgentMessage {
+        msg(agent_message::Message::Hello(Hello {
+            agent_version: "test".into(),
+            protocol_version,
+        }))
+    }
+
+    /// Opens a Session whose first message is `first`. Returns the Agent's sender and the
+    /// Server's reply stream (or the error status).
+    async fn open(
+        h: &Harness,
+        identity: Identity,
+        first: AgentMessage,
+    ) -> (
+        mpsc::Sender<AgentMessage>,
+        Result<Streaming<ServerMessage>, tonic::Status>,
+    ) {
+        let (tx, rx) = mpsc::channel(16);
+        tx.send(first).await.unwrap();
+        let resp = h
+            .client(Some(identity))
+            .await
+            .open_session(ReceiverStream::new(rx))
+            .await
+            .map(|r| r.into_inner());
+        (tx, resp)
+    }
+
+    async fn paired_endpoint(h: &Harness) -> (Uuid, Identity) {
+        let (id, identity) = pair(h, &KeyPair::generate().unwrap()).await;
+        (id.parse().unwrap(), identity)
+    }
+
+    /// Polls until `cond` holds or WAIT elapses.
+    async fn eventually(mut cond: impl AsyncFnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !cond().await {
+            assert!(Instant::now() < deadline, "condition not met in time");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn stream_ends(stream: &mut Streaming<ServerMessage>) {
+        let next = timeout(WAIT, stream.message())
+            .await
+            .expect("stream should end");
+        assert!(
+            !matches!(next, Ok(Some(_))),
+            "expected end of stream, got {next:?}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn session_acks_hello_goes_online_and_stores_data(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, identity) = paired_endpoint(&h).await;
+        let (tx, resp) = open(&h, identity, hello(1)).await;
+        let mut stream = resp.unwrap();
+
+        let ack = stream.message().await.unwrap().unwrap();
+        let Some(server_message::Message::HelloAck(ack)) = ack.message else {
+            panic!("expected HelloAck, got {ack:?}");
+        };
+        assert_eq!(ack.sample_interval.unwrap().seconds, 30);
+        assert_eq!(ack.heartbeat_interval.unwrap().seconds, 30);
+        assert_eq!(ack.inventory_interval.unwrap().seconds, 3600);
+        assert!(h.sessions.is_online(ep));
+
+        let inv = Inventory {
+            hostname: "web-01".into(),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            // The second, identical Inventory must not add a row.
+            tx.send(msg(agent_message::Message::Inventory(inv.clone())))
+                .await
+                .unwrap();
+        }
+        tx.send(msg(agent_message::Message::Heartbeat(Heartbeat {})))
+            .await
+            .unwrap();
+        tx.send(msg(agent_message::Message::Sample(Sample {
+            cpu_usage_percent: 12.5,
+            memory_used_bytes: 1024,
+            interfaces: vec![InterfaceSample {
+                name: "eth0".into(),
+                link_speed_bps: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })))
+        .await
+        .unwrap();
+
+        let pool = &h.pool;
+        eventually(async || {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM samples")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            n == 1
+        })
+        .await;
+        let (hostname, last_seen): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as("SELECT hostname, last_seen_at FROM endpoints WHERE id = $1")
+                .bind(ep)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(hostname, "web-01");
+        assert!(last_seen.is_some());
+        let inventories: i64 = sqlx::query_scalar("SELECT count(*) FROM inventories")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(inventories, 1);
+        let link_speed: serde_json::Value =
+            sqlx::query_scalar("SELECT interfaces -> 0 -> 'link_speed_bps' FROM samples")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(
+            link_speed.is_null(),
+            "unknown link speed must be null, not 0"
+        );
+
+        drop(tx);
+        eventually(async || !h.sessions.is_online(ep)).await;
+    }
+
+    #[sqlx::test]
+    async fn session_requires_hello_first_and_a_supported_protocol(pool: PgPool) {
+        let h = start(pool).await;
+        let (_, identity) = paired_endpoint(&h).await;
+        let (_tx, resp) = open(
+            &h,
+            identity.clone(),
+            msg(agent_message::Message::Heartbeat(Heartbeat {})),
+        )
+        .await;
+        assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let (_tx, resp) = open(&h, identity, hello(0)).await;
+        assert_eq!(resp.unwrap_err().code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[sqlx::test]
+    async fn newer_session_replaces_the_old_one(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, identity) = paired_endpoint(&h).await;
+        let (_tx1, resp1) = open(&h, identity.clone(), hello(1)).await;
+        let mut first = resp1.unwrap();
+        first.message().await.unwrap(); // HelloAck
+
+        let (_tx2, resp2) = open(&h, identity, hello(1)).await;
+        let mut second = resp2.unwrap();
+        second.message().await.unwrap(); // HelloAck
+
+        stream_ends(&mut first).await;
+        assert!(h.sessions.is_online(ep));
+    }
+
+    #[sqlx::test]
+    async fn silent_session_goes_offline(pool: PgPool) {
+        let settings = Settings {
+            offline_after: Duration::from_millis(300),
+            ..Settings::default()
+        };
+        let h = start_with(pool, settings).await;
+        let (ep, identity) = paired_endpoint(&h).await;
+        let (_tx, resp) = open(&h, identity, hello(1)).await;
+        let mut stream = resp.unwrap();
+        stream.message().await.unwrap(); // HelloAck
+        assert!(h.sessions.is_online(ep));
+
+        stream_ends(&mut stream).await;
+        assert!(!h.sessions.is_online(ep));
+    }
+
+    #[sqlx::test]
+    async fn revoked_endpoint_is_disconnected_and_cannot_reconnect(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, identity) = paired_endpoint(&h).await;
+        let (_tx, resp) = open(&h, identity.clone(), hello(1)).await;
+        let mut stream = resp.unwrap();
+        stream.message().await.unwrap(); // HelloAck
+
+        // What RevokeEndpoint will do: mark Revoked, then close the live Session.
+        sqlx::query("UPDATE endpoints SET revoked_at = now() WHERE id = $1")
+            .bind(ep)
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        h.sessions.disconnect(ep);
+        stream_ends(&mut stream).await;
+
+        let (_tx, resp) = open(&h, identity, hello(1)).await;
+        assert_eq!(resp.unwrap_err().code(), tonic::Code::Unauthenticated);
     }
 }
