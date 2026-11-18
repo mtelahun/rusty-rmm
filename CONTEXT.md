@@ -43,3 +43,11 @@ _Avoid_: Job, task, action
 **Sample**:
 One point-in-time Monitoring measurement from an Endpoint.
 _Avoid_: Metric, datapoint, reading
+
+**Pairing Token**:
+A reusable, expiring secret tied to one Environment that authorizes Pairing. Operators can revoke it.
+_Avoid_: Enrollment key, invite
+
+**Revoked**:
+The state of an Endpoint whose Agent is no longer allowed to open a Session.
+_Avoid_: Disabled, banned, blocked
