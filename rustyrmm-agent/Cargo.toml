@@ -3,11 +3,19 @@ name = "rustyrmm-agent"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/mtelahun/rusty-rmm"
+authors = ["Michael Telahun Makonnen"]
+homepage = "https://github.com/mtelahun/rusty-rmm"
 license = "BSD-2-Clause"
 description = "RustyRMM agent"
 keywords = ["grpc", "network", "client"]
 categories = ["os"]
 readme = "README.md"
+
+[package.metadata.wix]
+upgrade-guid = "6F21C627-3CAC-4EB2-95BC-6508D1A9A7B3"
+path-guid = "0B1EC544-C572-4268-82D5-6E81BF53B68E"
+license = false
+eula = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
