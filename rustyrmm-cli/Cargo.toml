@@ -11,6 +11,12 @@ keywords = ["grpc", "rmm", "cli"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 
+[package.metadata.wix]
+upgrade-guid = "7A3AB11D-53FB-4255-99D6-786DC888B731"
+path-guid = "57F3156F-F5D6-40C9-9271-877239EC2A4F"
+license = false
+eula = false
+
 [[bin]]
 name = "rustyrmm"
 path = "src/main.rs"
