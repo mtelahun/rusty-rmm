@@ -1,5 +1,6 @@
 //! RustyRMM Agent.
 
+pub mod commands;
 pub mod pairing;
 pub mod service;
 pub mod session;

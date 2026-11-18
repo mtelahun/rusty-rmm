@@ -4,9 +4,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rustyrmm_proto::agent::v1::{agent_message, AgentMessage};
 use rustyrmm_proto::common::v1::{
-    CpuInfo, DiskInfo, DiskSample, InterfaceSample, Inventory, NetworkInterface, OsInfo, Sample,
+    CpuInfo, DiskInfo, DiskSample, InterfaceSample, Inventory, NetworkInterface, OsInfo,
+    ProcessInfo, Sample,
 };
-use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, Product, RefreshKind, System};
+use sysinfo::{
+    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessesToUpdate, Product, RefreshKind,
+    System,
+};
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -208,6 +212,42 @@ async fn virtualization() -> (Option<String>, Option<String>) {
     // shortcut: Windows virtualization detection (WMI HypervisorPresent) is not implemented;
     // it stays unknown there.
     (None, None)
+}
+
+/// The current process list. CPU and disk rates need two readings, so this takes ~0.5s.
+pub fn process_list() -> Vec<ProcessInfo> {
+    const WINDOW: Duration = Duration::from_millis(500);
+    let Ok(mut system) = System::new() else {
+        return Vec::new();
+    };
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    std::thread::sleep(WINDOW);
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let per_sec = |bytes: u64| (bytes as f64 / WINDOW.as_secs_f64()) as u64;
+    let mut list: Vec<ProcessInfo> = system
+        .processes()
+        .values()
+        .map(|p| {
+            let disk = p.disk_usage();
+            ProcessInfo {
+                pid: p.pid().as_u32(),
+                ppid: p.parent().map(|pid| pid.as_u32()),
+                name: p.name().to_string_lossy().into_owned(),
+                state: p.status().to_string(),
+                memory_bytes: p.memory(),
+                cpu_usage_percent: p.cpu_usage(),
+                disk_read_bytes_per_sec: per_sec(disk.read_bytes),
+                disk_write_bytes_per_sec: per_sec(disk.written_bytes),
+                command_line: p
+                    .cmd()
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            }
+        })
+        .collect();
+    list.sort_by_key(|p| p.pid);
+    list
 }
 
 /// Sends a Sample every `every`, until the Session closes.

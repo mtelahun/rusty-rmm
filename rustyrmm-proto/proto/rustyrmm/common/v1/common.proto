@@ -124,4 +124,6 @@ message CommandResult {
   bool truncated = 5;
   google.protobuf.Timestamp started_at = 6;
   google.protobuf.Timestamp finished_at = 7;
+  // The Agent killed the process tree at the timeout; exit_code is then absent.
+  bool timed_out = 8;
 }

@@ -23,7 +23,7 @@ impl Default for Retention {
 
 /// How long past a Command's own timeout to wait for its result (covers an Agent reconnecting
 /// and resending) before marking it "outcome unknown".
-// shortcut: fixed at 5 minutes; becomes a setting with the Command execution limits decision.
+// Fixed by Grilling: Command execution limits.
 pub const OUTCOME_UNKNOWN_GRACE: Duration = Duration::from_secs(300);
 
 /// Runs forever: the Command sweep every minute; rollups and retention every 5 minutes.

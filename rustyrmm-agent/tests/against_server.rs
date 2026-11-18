@@ -159,7 +159,8 @@ async fn heartbeats_keep_the_session_alive(pool: PgPool) {
     let (dir, ep) = server.pair().await;
     let paired = Paired::load(dir.path()).unwrap();
 
-    let session = tokio::spawn(async move { session::session_once(&paired).await });
+    let outbox = Arc::new(rustyrmm_agent::commands::Outbox::default());
+    let session = tokio::spawn(async move { session::session_once(&paired, &outbox).await });
     eventually("Endpoint Online", || server.sessions.is_online(ep)).await;
     // Three times the offline timeout: without heartbeats the Server would have closed it.
     sleep(Duration::from_secs(3)).await;
@@ -234,5 +235,90 @@ async fn sends_inventory_and_samples_the_server_stores(pool: PgPool) {
             .await
             .unwrap();
     assert!(memory_total > 0);
+    agent.abort();
+}
+
+// --- Commands and process lists ---
+
+#[cfg(unix)]
+use rustyrmm_proto::common::v1::Interpreter;
+#[cfg(unix)]
+use rustyrmm_server::commands::{dispatch, NewCommand};
+
+#[cfg(unix)]
+fn sh(endpoint_id: Uuid, script: &str) -> NewCommand {
+    NewCommand {
+        endpoint_id,
+        operator_username: "alice".into(),
+        interpreter: Interpreter::Sh,
+        script: script.into(),
+        timeout_seconds: 30,
+    }
+}
+
+#[cfg(unix)]
+/// Waits for the Command's stored (status, stdout).
+async fn completed(pool: &PgPool, id: Uuid) -> (i16, Vec<u8>) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, stdout): (i16, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT status, stdout FROM commands WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        if status == 2 {
+            return (status, stdout.unwrap_or_default());
+        }
+        assert!(Instant::now() < deadline, "Command never completed");
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrations = "../rustyrmm-server/migrations")]
+async fn runs_commands_and_answers_process_lists(pool: PgPool) {
+    let server = start(pool, Settings::default()).await;
+    let (dir, ep) = server.pair().await;
+    let path = dir.path().to_path_buf();
+    let agent = tokio::spawn(async move { session::run(&path).await });
+    eventually("Endpoint Online", || server.sessions.is_online(ep)).await;
+
+    let id = dispatch(&server.pool, &server.sessions, sh(ep, "echo hello from $0"))
+        .await
+        .unwrap();
+    let (_, stdout) = completed(&server.pool, id).await;
+    assert!(String::from_utf8_lossy(&stdout).starts_with("hello from"));
+
+    let processes = server
+        .sessions
+        .request_process_list(ep, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let me = std::process::id();
+    assert!(
+        processes.iter().any(|p| p.pid == me),
+        "the test process is listed"
+    );
+    agent.abort();
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrations = "../rustyrmm-server/migrations")]
+async fn result_finished_while_disconnected_is_resent(pool: PgPool) {
+    let server = start(pool, Settings::default()).await;
+    let (dir, ep) = server.pair().await;
+    let path = dir.path().to_path_buf();
+    let agent = tokio::spawn(async move { session::run(&path).await });
+    eventually("Endpoint Online", || server.sessions.is_online(ep)).await;
+
+    let id = dispatch(&server.pool, &server.sessions, sh(ep, "sleep 1; echo done"))
+        .await
+        .unwrap();
+    // Drop the Session while the Command runs; the result must arrive on the next Session.
+    sleep(Duration::from_millis(300)).await;
+    server.sessions.disconnect(ep);
+    let (_, stdout) = completed(&server.pool, id).await;
+    assert_eq!(stdout, b"done\n");
     agent.abort();
 }
