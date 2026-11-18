@@ -307,16 +307,16 @@ mod tests {
         assert!(s.collected_at.is_some());
     }
 
-    #[tokio::test]
-    async fn inventory_describes_this_machine() {
-        let inv = inventory().await.unwrap();
+    // The static part only: the update check goes over the network and has its own tests.
+    #[test]
+    fn inventory_describes_this_machine() {
+        let inv = static_inventory().unwrap();
         assert!(!inv.hostname.is_empty());
         let os = inv.os.unwrap();
         assert_eq!(os.family, std::env::consts::OS);
         let cpu = inv.cpu.unwrap();
         assert!(cpu.thread_count >= 1);
         assert!(inv.memory_total_bytes > 0);
-        assert!(inv.updates.is_some());
     }
 
     #[test]

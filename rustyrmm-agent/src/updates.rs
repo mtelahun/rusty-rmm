@@ -27,8 +27,9 @@ async fn output(program: &str, args: &[&str]) -> Option<(i32, String)> {
 
 #[cfg(target_os = "linux")]
 async fn os_check() -> Option<UpdateStatus> {
-    // Debian/Ubuntu: a simulated upgrade lists what would be installed.
-    if let Some((0, out)) = output("apt-get", &["-s", "-q", "upgrade"]).await {
+    // Debian/Ubuntu: a simulated (-s) dist-upgrade lists what would be installed. Plain
+    // `upgrade` keeps back updates that need new packages, such as kernel updates.
+    if let Some((0, out)) = output("apt-get", &["-s", "-q", "dist-upgrade"]).await {
         return Some(parse_apt(&out));
     }
     // Fedora/RHEL: check-update exits 100 when updates exist.
@@ -91,7 +92,7 @@ fn split(total: u32, security: Option<u32>) -> UpdateStatus {
     }
 }
 
-/// `apt-get -s upgrade`: one `Inst` line per package; the origin in brackets names the
+/// `apt-get -s dist-upgrade`: one `Inst` line per package; the origin in brackets names the
 /// suite, and `-security` suites carry security updates.
 pub fn parse_apt(out: &str) -> UpdateStatus {
     let inst: Vec<&str> = out.lines().filter(|l| l.starts_with("Inst ")).collect();
