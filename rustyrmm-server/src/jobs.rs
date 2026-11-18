@@ -29,7 +29,7 @@ pub const OUTCOME_UNKNOWN_GRACE: Duration = Duration::from_secs(300);
 /// Runs forever: the Command sweep every minute; rollups and retention every 5 minutes.
 pub async fn run(pool: PgPool, retention: Retention) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
-    for n in 0u64.. {
+    for n in 0u64..=u64::MAX {
         tick.tick().await;
         report(
             "command timeouts",
