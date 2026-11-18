@@ -240,9 +240,12 @@ async fn sends_inventory_and_samples_the_server_stores(pool: PgPool) {
 
 // --- Commands and process lists ---
 
+#[cfg(unix)]
 use rustyrmm_proto::common::v1::Interpreter;
+#[cfg(unix)]
 use rustyrmm_server::commands::{dispatch, NewCommand};
 
+#[cfg(unix)]
 fn sh(endpoint_id: Uuid, script: &str) -> NewCommand {
     NewCommand {
         endpoint_id,
@@ -253,6 +256,7 @@ fn sh(endpoint_id: Uuid, script: &str) -> NewCommand {
     }
 }
 
+#[cfg(unix)]
 /// Waits for the Command's stored (status, stdout).
 async fn completed(pool: &PgPool, id: Uuid) -> (i16, Vec<u8>) {
     let deadline = Instant::now() + Duration::from_secs(30);
