@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use rustyrmm_agent::{pairing, session, state};
+use rustyrmm_agent::{pairing, service, session, state};
 
 #[derive(Parser)]
 #[command(version, about = "RustyRMM Agent")]
@@ -24,7 +24,18 @@ enum Command {
         /// SHA-256 fingerprint of the Server's Agent CA, from the Pairing one-liner.
         #[arg(long)]
         ca_fingerprint: String,
+        /// Also install and start the Agent as an OS service (needs root/Administrator).
+        #[arg(long)]
+        install_service: bool,
     },
+    /// Install and start the Agent as an OS service (needs root/Administrator).
+    InstallService,
+    /// Stop and remove the OS service. Pairing state is kept.
+    UninstallService,
+    /// Entry point used by the Windows Service Control Manager.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Service,
     /// Keep a Session open with the Server (what the service runs).
     Run,
 }
@@ -37,11 +48,32 @@ async fn main() -> anyhow::Result<()> {
             pairing_token,
             server,
             ca_fingerprint,
+            install_service,
         } => {
             let id =
                 pairing::pair(&cli.state_dir, &server, &pairing_token, &ca_fingerprint).await?;
             println!("Paired as Endpoint {id}");
+            if install_service {
+                service::install(&cli.state_dir)?;
+                println!(
+                    "Installed and started the {} service",
+                    service::SERVICE_NAME
+                );
+            }
         }
+        Command::InstallService => {
+            service::install(&cli.state_dir)?;
+            println!(
+                "Installed and started the {} service",
+                service::SERVICE_NAME
+            );
+        }
+        Command::UninstallService => {
+            service::uninstall()?;
+            println!("Removed the {} service", service::SERVICE_NAME);
+        }
+        #[cfg(windows)]
+        Command::Service => return service::run_as_service(&cli.state_dir),
         Command::Run => session::run(&cli.state_dir).await?,
     }
     Ok(())
