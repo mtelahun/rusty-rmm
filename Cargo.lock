@@ -2024,6 +2024,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tonic-web",
+ "tower",
  "uuid",
  "x509-parser",
 ]
@@ -2686,6 +2688,24 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "tonic-build",
+]
+
+[[package]]
+name = "tonic-web"
+version = "0.14.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67eda80540de6fe4952090ef5b8cb6a8b0cd559dc60818ebb57d23e14b10966e"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "http",
+ "http-body",
+ "pin-project",
+ "tokio-stream",
+ "tonic",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
