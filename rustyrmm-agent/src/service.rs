@@ -38,8 +38,22 @@ pub fn uninstall() -> anyhow::Result<()> {
     }
 }
 
+/// The file to copy into place as the root service: the image that is actually running, not a
+/// path whose file could be swapped between launch and copy.
+fn running_binary() -> std::io::Result<PathBuf> {
+    // Linux: /proc/self/exe opens the running image itself, even if its original path changed.
+    if cfg!(target_os = "linux") {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+    // Windows locks a running executable against replacement, so its path is safe to copy.
+    // shortcut: macOS has no equivalent, so a user who can write the binary's directory could
+    // swap it between launch and copy. That user could equally replace it before `sudo` runs;
+    // revisit if the Agent ships as a root-owned package (.pkg) instead.
+    std::env::current_exe()
+}
+
 fn copy_self_to(dest: &Path) -> anyhow::Result<()> {
-    let current = std::env::current_exe()?;
+    let current = running_binary()?;
     if current.canonicalize().ok() == dest.canonicalize().ok() {
         return Ok(());
     }
@@ -307,6 +321,15 @@ mod os {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_the_running_binary_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bin").join("rustyrmm-agent");
+        copy_self_to(&dest).unwrap();
+        let running = std::fs::read(running_binary().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), running);
+    }
 
     #[test]
     fn systemd_unit_runs_the_installed_binary_with_the_state_dir() {
