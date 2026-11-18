@@ -51,3 +51,7 @@ _Avoid_: Enrollment key, invite
 **Revoked**:
 The state of an Endpoint whose Agent is no longer allowed to open a Session.
 _Avoid_: Disabled, banned, blocked
+
+**Inventory**:
+The descriptive snapshot of an Endpoint: hardware, OS, network and update status. Contrast with a Sample, which is a point-in-time measurement.
+_Avoid_: Endpoint Information, facts, specs
