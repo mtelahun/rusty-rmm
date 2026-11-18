@@ -27,3 +27,19 @@ _Avoid_: Tenant, organization, group
 **Pairing**:
 Associating a new Endpoint with an Environment by installing the Agent from an Environment-specific link.
 _Avoid_: Enrollment, onboarding
+
+**Session**:
+One Agent's live connection to the Server, from its hello until disconnect. A newer Session for the same Agent replaces the old one.
+_Avoid_: Connection, stream
+
+**Online**:
+The state of an Endpoint whose Agent has a live Session with recent heartbeats.
+_Avoid_: Connected, up
+
+**Command**:
+An Operator's request to run something on an Endpoint, ending in a result.
+_Avoid_: Job, task, action
+
+**Sample**:
+One point-in-time Monitoring measurement from an Endpoint.
+_Avoid_: Metric, datapoint, reading
