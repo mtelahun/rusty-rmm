@@ -30,7 +30,7 @@ pub async fn inventory(pool: &PgPool, endpoint_id: Uuid, inv: &Inventory) -> sql
          VALUES ($1, $2, now(), $3)",
     )
     .bind(endpoint_id)
-    .bind(collected_at(inv.collected_at.as_ref()))
+    .bind(agent_time(inv.collected_at.as_ref()))
     .bind(inv.encode_to_vec())
     .execute(&mut *tx)
     .await?;
@@ -74,7 +74,7 @@ pub async fn sample(pool: &PgPool, endpoint_id: Uuid, s: &Sample) -> sqlx::Resul
          VALUES ($1, $2, now(), $3, $4, $5, $6, $7)",
     )
     .bind(endpoint_id)
-    .bind(collected_at(s.collected_at.as_ref()))
+    .bind(agent_time(s.collected_at.as_ref()))
     .bind(s.cpu_usage_percent)
     .bind(to_bigint(s.memory_used_bytes))
     .bind(to_bigint(s.memory_total_bytes))
@@ -99,7 +99,7 @@ fn without_timestamp(mut inv: Inventory) -> Inventory {
 }
 
 /// The Agent's timestamp; falls back to now if the Agent omitted or garbled it.
-fn collected_at(ts: Option<&prost_types::Timestamp>) -> DateTime<Utc> {
+pub fn agent_time(ts: Option<&prost_types::Timestamp>) -> DateTime<Utc> {
     ts.and_then(|t| DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?))
         .unwrap_or_else(Utc::now)
 }
