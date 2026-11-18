@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+// Served on the Server's Agent port (mTLS, HTTP/2 only).
+// Client certificates are optional at the TLS layer: `Pair` is the only call
+// allowed without one; every other call requires one. The Endpoint's identity
+// comes only from the client certificate, so no message carries an Endpoint id.
+package rustyrmm.agent.v1;
+
+import "google/protobuf/duration.proto";
+import "rustyrmm/common/v1/common.proto";
+
+service AgentService {
+  // Exchanges a Pairing Token and a signing request for an Agent certificate.
+  // PERMISSION_DENIED for an expired or revoked Pairing Token.
+  rpc Pair(PairRequest) returns (PairResponse);
+  // Authenticated by the current certificate. UNAUTHENTICATED when Revoked.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+  // Opens the Agent's Session. The first AgentMessage must be a Hello.
+  // (Not named Connect: that collides with the client constructor tonic generates.)
+  // FAILED_PRECONDITION when protocol_version is below the Server's minimum.
+  rpc OpenSession(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message PairRequest {
+  string pairing_token = 1;
+  // PKCS#10 certificate signing request; the private key never leaves the Endpoint.
+  string csr_pem = 2;
+}
+
+message PairResponse {
+  // Server-generated UUIDv7 of the new Endpoint.
+  string endpoint_id = 1;
+  string certificate_pem = 2;
+}
+
+message RenewCertificateRequest {
+  string csr_pem = 1;
+}
+
+message RenewCertificateResponse {
+  string certificate_pem = 1;
+}
+
+message AgentMessage {
+  oneof message {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    rustyrmm.common.v1.Inventory inventory = 3;
+    rustyrmm.common.v1.Sample sample = 4;
+    rustyrmm.common.v1.CommandResult command_result = 5;
+    ProcessList process_list = 6;
+  }
+}
+
+message Hello {
+  string agent_version = 1;
+  uint32 protocol_version = 2;
+}
+
+message Heartbeat {}
+
+message ProcessList {
+  string request_id = 1;
+  repeated rustyrmm.common.v1.ProcessInfo processes = 2;
+}
+
+message ServerMessage {
+  oneof message {
+    HelloAck hello_ack = 1;
+    rustyrmm.common.v1.Command command = 2;
+    ProcessListRequest process_list_request = 3;
+  }
+}
+
+message HelloAck {
+  google.protobuf.Duration inventory_interval = 1;
+  google.protobuf.Duration sample_interval = 2;
+  google.protobuf.Duration heartbeat_interval = 3;
+}
+
+message ProcessListRequest {
+  string request_id = 1;
+}

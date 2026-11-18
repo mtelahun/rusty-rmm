@@ -1,0 +1,245 @@
+syntax = "proto3";
+
+// Served on the Server's Operator port (public-CA TLS, tonic-web), so every
+// call is unary. Authentication: `authorization: Bearer <token>` metadata, or
+// for grpc-web requests the session cookie set by Login.
+// Errors use standard gRPC codes: UNAVAILABLE (Endpoint Offline),
+// UNAUTHENTICATED, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED.
+// All ids are Server-generated UUIDv7 strings.
+package rustyrmm.operator.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "rustyrmm/common/v1/common.proto";
+
+service OperatorService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc AddOperator(AddOperatorRequest) returns (AddOperatorResponse);
+
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
+  rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
+
+  rpc CreatePairingToken(CreatePairingTokenRequest) returns (CreatePairingTokenResponse);
+  rpc ListPairingTokens(ListPairingTokensRequest) returns (ListPairingTokensResponse);
+  rpc RevokePairingToken(RevokePairingTokenRequest) returns (RevokePairingTokenResponse);
+
+  rpc ListEndpoints(ListEndpointsRequest) returns (ListEndpointsResponse);
+  rpc GetEndpoint(GetEndpointRequest) returns (Endpoint);
+  rpc RevokeEndpoint(RevokeEndpointRequest) returns (RevokeEndpointResponse);
+  rpc DeleteEndpoint(DeleteEndpointRequest) returns (DeleteEndpointResponse);
+
+  rpc ListSamples(ListSamplesRequest) returns (ListSamplesResponse);
+  // Live request over the Endpoint's Session; nothing is stored.
+  // UNAVAILABLE when Offline, DEADLINE_EXCEEDED after 10s without a reply.
+  rpc GetProcessList(GetProcessListRequest) returns (GetProcessListResponse);
+
+  // UNAVAILABLE when the Endpoint is Offline; Commands are never queued.
+  rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
+  rpc GetCommand(GetCommandRequest) returns (CommandRecord);
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+}
+
+// --- Operators ---
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string session_token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message LogoutRequest {}
+message LogoutResponse {}
+
+message AddOperatorRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message AddOperatorResponse {
+  string operator_id = 1;
+}
+
+// --- Environments ---
+
+message Environment {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message CreateEnvironmentRequest {
+  string name = 1;
+}
+
+message ListEnvironmentsRequest {
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListEnvironmentsResponse {
+  repeated Environment environments = 1;
+  string next_page_token = 2;
+}
+
+// --- Pairing Tokens ---
+
+message PairingToken {
+  string id = 1;
+  string environment_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  bool revoked = 5;
+}
+
+message CreatePairingTokenRequest {
+  string environment_id = 1;
+  // Defaults to the Server's setting (7 days) when absent.
+  optional google.protobuf.Duration ttl = 2;
+}
+
+message CreatePairingTokenResponse {
+  PairingToken pairing_token = 1;
+  // The secret itself: shown once, stored by the Server only as a hash.
+  string secret = 2;
+  // Everything the install one-liner needs besides the secret.
+  string agent_address = 3;
+  string ca_fingerprint_sha256 = 4;
+}
+
+message ListPairingTokensRequest {
+  string environment_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListPairingTokensResponse {
+  repeated PairingToken pairing_tokens = 1;
+  string next_page_token = 2;
+}
+
+message RevokePairingTokenRequest {
+  string id = 1;
+}
+
+message RevokePairingTokenResponse {}
+
+// --- Endpoints ---
+
+message Endpoint {
+  string id = 1;
+  string environment_id = 2;
+  string hostname = 3;
+  bool online = 4;
+  bool revoked = 5;
+  google.protobuf.Timestamp paired_at = 6;
+  optional google.protobuf.Timestamp last_seen_at = 7;
+  // Latest Inventory; absent until the Agent first sends one.
+  optional rustyrmm.common.v1.Inventory inventory = 8;
+}
+
+message ListEndpointsRequest {
+  optional string environment_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListEndpointsResponse {
+  repeated Endpoint endpoints = 1;
+  string next_page_token = 2;
+}
+
+message GetEndpointRequest {
+  string id = 1;
+}
+
+message RevokeEndpointRequest {
+  string id = 1;
+}
+
+message RevokeEndpointResponse {}
+
+message DeleteEndpointRequest {
+  string id = 1;
+}
+
+message DeleteEndpointResponse {}
+
+// --- Monitoring ---
+
+message ListSamplesRequest {
+  string endpoint_id = 1;
+  google.protobuf.Timestamp start = 2;
+  google.protobuf.Timestamp end = 3;
+  uint32 page_size = 4;
+  string page_token = 5;
+}
+
+message ListSamplesResponse {
+  repeated rustyrmm.common.v1.Sample samples = 1;
+  string next_page_token = 2;
+}
+
+message GetProcessListRequest {
+  string endpoint_id = 1;
+}
+
+message GetProcessListResponse {
+  repeated rustyrmm.common.v1.ProcessInfo processes = 1;
+  google.protobuf.Timestamp received_at = 2;
+}
+
+// --- Commands ---
+
+message RunCommandRequest {
+  string endpoint_id = 1;
+  rustyrmm.common.v1.Interpreter interpreter = 2;
+  string script = 3;
+  uint32 timeout_seconds = 4;
+}
+
+message RunCommandResponse {
+  string command_id = 1;
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  // Sent to the Agent; no result yet.
+  COMMAND_STATUS_DISPATCHED = 1;
+  COMMAND_STATUS_COMPLETED = 2;
+  // No result arrived before the timeout (e.g. the Agent restarted).
+  COMMAND_STATUS_OUTCOME_UNKNOWN = 3;
+}
+
+message CommandRecord {
+  string id = 1;
+  string endpoint_id = 2;
+  // Kept so the record survives DeleteEndpoint.
+  string endpoint_hostname = 3;
+  string operator_username = 4;
+  rustyrmm.common.v1.Interpreter interpreter = 5;
+  string script = 6;
+  uint32 timeout_seconds = 7;
+  CommandStatus status = 8;
+  google.protobuf.Timestamp created_at = 9;
+  optional rustyrmm.common.v1.CommandResult result = 10;
+}
+
+message GetCommandRequest {
+  string id = 1;
+}
+
+message ListCommandsRequest {
+  optional string endpoint_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListCommandsResponse {
+  repeated CommandRecord commands = 1;
+  string next_page_token = 2;
+}
