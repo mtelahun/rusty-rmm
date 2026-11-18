@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rustyrmm_proto::agent::v1::ServerMessage;
-use tokio::sync::{mpsc, Notify};
+use rustyrmm_proto::agent::v1::{server_message, ProcessList, ProcessListRequest, ServerMessage};
+use rustyrmm_proto::common::v1::ProcessInfo;
+use tokio::sync::{mpsc, oneshot, Notify};
 use tonic::Status;
 use uuid::Uuid;
 
 pub type Outbound = mpsc::Sender<Result<ServerMessage, Status>>;
+type ProcessListReply = oneshot::Sender<Vec<ProcessInfo>>;
 
 /// Session timing, sent to Agents in HelloAck where relevant.
 #[derive(Clone, Copy, Debug)]
@@ -39,8 +41,6 @@ impl Default for Settings {
 
 struct Handle {
     id: u64,
-    // Read by Command dispatch in Task: Server Commands and background jobs.
-    #[allow(dead_code)]
     outbound: Outbound,
     close: Arc<Notify>,
 }
@@ -49,6 +49,16 @@ struct Handle {
 pub struct Sessions {
     live: Mutex<HashMap<Uuid, Handle>>,
     next_id: AtomicU64,
+    /// Process-list requests awaiting the Agent's reply, keyed by (Endpoint, request id).
+    pending_process_lists: Mutex<HashMap<(Uuid, String), ProcessListReply>>,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LiveError {
+    #[error("Endpoint is Offline")]
+    Offline,
+    #[error("Endpoint did not reply in time")]
+    Timeout,
 }
 
 /// A registered Session: `close` fires when it is replaced or disconnected.
@@ -75,6 +85,54 @@ impl Sessions {
             old.close.notify_one();
         }
         Registration { id, close }
+    }
+
+    /// The live Session's outbound channel, if the Endpoint is Online.
+    pub fn sender(&self, endpoint_id: Uuid) -> Option<Outbound> {
+        let live = self.live.lock().unwrap();
+        live.get(&endpoint_id).map(|h| h.outbound.clone())
+    }
+
+    /// Asks the Endpoint for its process list and waits up to `wait` for the reply.
+    /// Nothing is stored.
+    // Called by the Operator API's GetProcessList once it exists.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn request_process_list(
+        &self,
+        endpoint_id: Uuid,
+        wait: Duration,
+    ) -> Result<Vec<ProcessInfo>, LiveError> {
+        let outbound = self.sender(endpoint_id).ok_or(LiveError::Offline)?;
+        let request_id = Uuid::now_v7().to_string();
+        let key = (endpoint_id, request_id.clone());
+        let (tx, rx) = oneshot::channel();
+        self.pending_process_lists
+            .lock()
+            .unwrap()
+            .insert(key.clone(), tx);
+        let request = ServerMessage {
+            message: Some(server_message::Message::ProcessListRequest(
+                ProcessListRequest { request_id },
+            )),
+        };
+        let result = match outbound.send(Ok(request)).await {
+            Err(_) => Err(LiveError::Offline),
+            Ok(()) => match tokio::time::timeout(wait, rx).await {
+                Ok(Ok(processes)) => Ok(processes),
+                Ok(Err(_)) | Err(_) => Err(LiveError::Timeout),
+            },
+        };
+        self.pending_process_lists.lock().unwrap().remove(&key);
+        result
+    }
+
+    /// Delivers an Agent's process list to the request waiting for it, if any.
+    /// Keyed by Endpoint too, so one Agent cannot answer another's request.
+    pub fn complete_process_list(&self, endpoint_id: Uuid, list: ProcessList) {
+        let key = (endpoint_id, list.request_id);
+        if let Some(tx) = self.pending_process_lists.lock().unwrap().remove(&key) {
+            let _ = tx.send(list.processes);
+        }
     }
 
     /// Removes the Session if it is still the registered one (a replacement may already exist).

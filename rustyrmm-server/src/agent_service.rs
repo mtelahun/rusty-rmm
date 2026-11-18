@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::ca::{Ca, IssuedCert};
 use crate::sessions::{Registration, Sessions, Settings};
-use crate::{ingest, pairing};
+use crate::{commands, ingest, pairing};
 
 /// Agents older than this protocol version are refused at Hello.
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
@@ -164,10 +164,12 @@ async fn run_session(
             Some(agent_message::Message::Sample(sample)) => {
                 log_err(ingest::sample(&pool, endpoint_id, &sample).await)
             }
-            // shortcut: Command results and process lists are handled by
-            // Task: Server Commands and background jobs; until then they are dropped.
-            Some(agent_message::Message::CommandResult(_))
-            | Some(agent_message::Message::ProcessList(_)) => {}
+            Some(agent_message::Message::CommandResult(result)) => {
+                log_err(commands::record_result(&pool, endpoint_id, &result).await)
+            }
+            Some(agent_message::Message::ProcessList(list)) => {
+                sessions.complete_process_list(endpoint_id, list)
+            }
             // Heartbeats only keep the Session alive; a repeated Hello is ignored.
             Some(agent_message::Message::Heartbeat(_))
             | Some(agent_message::Message::Hello(_))
@@ -709,5 +711,154 @@ mod tests {
 
         let (_tx, resp) = open(&h, identity, hello(1)).await;
         assert_eq!(resp.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    // --- Commands and process lists ---
+
+    use crate::commands::{dispatch, DispatchError, NewCommand};
+    use crate::sessions::LiveError;
+    use rustyrmm_proto::agent::v1::ProcessList;
+    use rustyrmm_proto::common::v1::{CommandResult, Interpreter, ProcessInfo};
+
+    /// A paired Endpoint with an open Session, past the HelloAck.
+    async fn online(h: &Harness) -> (Uuid, mpsc::Sender<AgentMessage>, Streaming<ServerMessage>) {
+        let (ep, identity) = paired_endpoint(h).await;
+        let (tx, resp) = open(h, identity, hello(1)).await;
+        let mut stream = resp.unwrap();
+        stream.message().await.unwrap(); // HelloAck
+        (ep, tx, stream)
+    }
+
+    fn new_command(endpoint_id: Uuid) -> NewCommand {
+        NewCommand {
+            endpoint_id,
+            operator_username: "alice".into(),
+            interpreter: Interpreter::Sh,
+            script: "echo hi".into(),
+            timeout_seconds: 30,
+        }
+    }
+
+    fn result(id: &str, stdout: &str) -> AgentMessage {
+        msg(agent_message::Message::CommandResult(CommandResult {
+            id: id.into(),
+            exit_code: Some(0),
+            stdout: stdout.into(),
+            ..Default::default()
+        }))
+    }
+
+    /// Waits until the Server has processed everything `tx` sent so far (messages are handled
+    /// in order, so once this Sample is stored, earlier messages were handled too).
+    async fn flush(h: &Harness, tx: &mpsc::Sender<AgentMessage>) {
+        let pool = &h.pool;
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM samples")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        tx.send(msg(agent_message::Message::Sample(Sample::default())))
+            .await
+            .unwrap();
+        eventually(async || {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM samples")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            n > before
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    async fn command_round_trips_and_its_result_is_stored_once(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, tx, mut stream) = online(&h).await;
+        let (_other, other_tx, _other_stream) = online(&h).await;
+
+        let id = dispatch(&h.pool, &h.sessions, new_command(ep))
+            .await
+            .unwrap();
+        let sent = stream.message().await.unwrap().unwrap();
+        let Some(server_message::Message::Command(cmd)) = sent.message else {
+            panic!("expected Command, got {sent:?}");
+        };
+        assert_eq!(cmd.id, id.to_string());
+        assert_eq!(cmd.script, "echo hi");
+
+        // Another Endpoint cannot complete this Command.
+        other_tx.send(result(&cmd.id, "forged")).await.unwrap();
+        // The real result, then a resend after a "reconnect" that must be ignored.
+        tx.send(result(&cmd.id, "hi")).await.unwrap();
+        tx.send(result(&cmd.id, "again")).await.unwrap();
+        flush(&h, &other_tx).await;
+        flush(&h, &tx).await;
+
+        let (status, stdout, hostname): (i16, Vec<u8>, String) =
+            sqlx::query_as("SELECT status, stdout, endpoint_hostname FROM commands WHERE id = $1")
+                .bind(id)
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(status, 2, "Completed");
+        assert_eq!(stdout, b"hi");
+        assert_eq!(hostname, "");
+    }
+
+    #[sqlx::test]
+    async fn command_to_offline_endpoint_is_rejected_and_not_stored(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, _) = paired_endpoint(&h).await;
+        let err = dispatch(&h.pool, &h.sessions, new_command(ep))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DispatchError::Live(LiveError::Offline)));
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM commands")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test]
+    async fn process_list_is_relayed_live(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, tx, mut stream) = online(&h).await;
+
+        let sessions = h.sessions.clone();
+        let request = tokio::spawn(async move {
+            sessions
+                .request_process_list(ep, Duration::from_secs(5))
+                .await
+        });
+        let sent = stream.message().await.unwrap().unwrap();
+        let Some(server_message::Message::ProcessListRequest(req)) = sent.message else {
+            panic!("expected ProcessListRequest, got {sent:?}");
+        };
+        tx.send(msg(agent_message::Message::ProcessList(ProcessList {
+            request_id: req.request_id,
+            processes: vec![ProcessInfo {
+                pid: 42,
+                name: "init".into(),
+                ..Default::default()
+            }],
+        })))
+        .await
+        .unwrap();
+        let processes = request.await.unwrap().unwrap();
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].pid, 42);
+
+        // An Agent that never answers times out; an Offline Endpoint fails at once.
+        let silent = h
+            .sessions
+            .request_process_list(ep, Duration::from_millis(200))
+            .await;
+        assert_eq!(silent.unwrap_err(), LiveError::Timeout);
+        let (offline, _) = paired_endpoint(&h).await;
+        let err = h
+            .sessions
+            .request_process_list(offline, Duration::from_secs(5))
+            .await;
+        assert_eq!(err.unwrap_err(), LiveError::Offline);
     }
 }

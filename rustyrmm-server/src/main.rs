@@ -1,7 +1,9 @@
 mod agent_service;
 mod ca;
+mod commands;
 mod db;
 mod ingest;
+mod jobs;
 mod operators;
 mod pairing;
 mod sessions;
@@ -49,6 +51,12 @@ enum Command {
         /// Seconds between Inventory change checks.
         #[arg(long, default_value_t = 3600)]
         inventory_secs: u64,
+        /// Days to keep raw 30-second Samples.
+        #[arg(long, default_value_t = 7)]
+        sample_retention_days: u64,
+        /// Days to keep 5-minute Sample rollups.
+        #[arg(long, default_value_t = 90)]
+        rollup_retention_days: u64,
     },
     /// Manage Operators (run on the Server host).
     Operator {
@@ -79,7 +87,14 @@ async fn main() -> anyhow::Result<()> {
             offline_after_secs,
             sample_secs,
             inventory_secs,
+            sample_retention_days,
+            rollup_retention_days,
         } => {
+            const DAY: u64 = 86_400;
+            let retention = jobs::Retention {
+                raw_samples: Duration::from_secs(sample_retention_days * DAY),
+                rollups: Duration::from_secs(rollup_retention_days * DAY),
+            };
             let settings = sessions::Settings {
                 heartbeat_interval: Duration::from_secs(heartbeat_secs),
                 offline_after: Duration::from_secs(offline_after_secs),
@@ -89,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let pool = db::connect(&database_url).await?;
             let ca = Arc::new(ca::Ca::load_or_create(&state_dir)?);
+            tokio::spawn(jobs::run(pool.clone(), retention));
             println!(
                 "Agent CA fingerprint (SHA-256): {}",
                 ca.fingerprint_sha256()
