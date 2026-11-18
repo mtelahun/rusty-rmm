@@ -95,8 +95,6 @@ impl Sessions {
 
     /// Asks the Endpoint for its process list and waits up to `wait` for the reply.
     /// Nothing is stored.
-    // Called by the Operator API's GetProcessList once it exists.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn request_process_list(
         &self,
         endpoint_id: Uuid,
@@ -143,15 +141,11 @@ impl Sessions {
         }
     }
 
-    // Used by the Operator API (GetEndpoint, ListEndpoints) once it exists.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_online(&self, endpoint_id: Uuid) -> bool {
         self.live.lock().unwrap().contains_key(&endpoint_id)
     }
 
     /// Closes the Endpoint's Session, e.g. when it is Revoked or deleted.
-    // Called by the Operator API's RevokeEndpoint/DeleteEndpoint once it exists.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn disconnect(&self, endpoint_id: Uuid) {
         if let Some(old) = self.live.lock().unwrap().remove(&endpoint_id) {
             old.close.notify_one();

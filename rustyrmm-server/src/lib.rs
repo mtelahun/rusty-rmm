@@ -1,0 +1,11 @@
+//! RustyRMM Server. A library so other crates' tests (e.g. the Agent's) can run it in-process.
+
+pub mod agent_service;
+pub mod ca;
+pub mod commands;
+pub mod db;
+pub mod ingest;
+pub mod jobs;
+pub mod operators;
+pub mod pairing;
+pub mod sessions;

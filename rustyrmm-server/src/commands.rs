@@ -28,8 +28,6 @@ pub struct NewCommand {
 
 /// Records the Command and sends it to the Endpoint's live Session. Commands are never queued:
 /// an Offline Endpoint gets `LiveError::Offline` and nothing is stored.
-// Called by the Operator API's RunCommand once it exists.
-#[cfg_attr(not(test), allow(dead_code))]
 pub async fn dispatch(
     pool: &PgPool,
     sessions: &Sessions,

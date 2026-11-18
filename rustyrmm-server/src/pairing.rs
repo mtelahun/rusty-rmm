@@ -9,8 +9,6 @@ pub fn hash_secret(secret: &str) -> Vec<u8> {
 }
 
 /// Creates a Pairing Token and returns (id, secret). The secret is shown once and never stored.
-// Used by tests until the Operator API's CreatePairingToken calls it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub async fn create_token(
     pool: &PgPool,
     environment_id: Uuid,

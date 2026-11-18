@@ -1,13 +1,3 @@
-mod agent_service;
-mod ca;
-mod commands;
-mod db;
-mod ingest;
-mod jobs;
-mod operators;
-mod pairing;
-mod sessions;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
+use rustyrmm_server::{agent_service, ca, db, jobs, operators, sessions};
 
 #[derive(Parser)]
 #[command(version, about = "RustyRMM Server")]

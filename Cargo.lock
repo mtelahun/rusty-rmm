@@ -353,7 +353,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1872,9 +1874,27 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "rustyrmm-agent"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "hex",
+ "pem",
+ "prost-types",
+ "rand 0.10.4",
+ "rcgen",
+ "rustls",
  "rustyrmm-proto",
+ "rustyrmm-server",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqlx",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]
