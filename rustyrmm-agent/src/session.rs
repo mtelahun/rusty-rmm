@@ -15,6 +15,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::pairing::host;
 use crate::state::Paired;
+use crate::telemetry;
 
 /// Sent in Hello; the Server refuses Agents below its minimum.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -86,11 +87,22 @@ pub async fn session_once(paired: &Paired) -> anyhow::Result<()> {
         Some(server_message::Message::HelloAck(ack)) => ack,
         other => anyhow::bail!("expected HelloAck, got {other:?}"),
     };
-    let heartbeat_every = ack
-        .heartbeat_interval
-        .and_then(|d| Duration::try_from(d).ok())
-        .filter(|d| !d.is_zero())
-        .unwrap_or(Duration::from_secs(30));
+    let interval_or = |d: Option<prost_types::Duration>, default: u64| {
+        d.and_then(|d| Duration::try_from(d).ok())
+            .filter(|d| !d.is_zero())
+            .unwrap_or(Duration::from_secs(default))
+    };
+    let heartbeat_every = interval_or(ack.heartbeat_interval, 30);
+    // Telemetry runs beside the Session loop (a slow update check must not delay heartbeats)
+    // and stops when the Session ends.
+    let _samples = AbortOnDrop(tokio::spawn(telemetry::send_samples(
+        tx.clone(),
+        interval_or(ack.sample_interval, 30),
+    )));
+    let _inventory = AbortOnDrop(tokio::spawn(telemetry::send_inventory(
+        tx.clone(),
+        interval_or(ack.inventory_interval, 3600),
+    )));
 
     let mut heartbeat = interval(heartbeat_every);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -150,6 +162,14 @@ fn expires_within(cert_pem: &str, window: Duration) -> anyhow::Result<bool> {
     let (_, cert) = x509_parser::parse_x509_certificate(&der)?;
     let remaining = cert.validity().time_to_expiration();
     Ok(remaining.is_none_or(|left| left.unsigned_abs() < window))
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn message(m: agent_message::Message) -> AgentMessage {
