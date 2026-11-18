@@ -113,8 +113,10 @@ async fn main() -> anyhow::Result<()> {
                 "Agent CA fingerprint (SHA-256): {}",
                 ca.fingerprint_sha256()
             );
+            let sessions = Arc::new(sessions::Sessions::default());
             let operator_api = operator_service::OperatorApi {
                 pool: pool.clone(),
+                sessions: sessions.clone(),
                 agent_address: format!("{}:{}", agent_names[0], agent_listen.port()),
                 ca_fingerprint: ca.fingerprint_sha256(),
             };
@@ -127,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 .add_service(AgentServiceServer::new(agent_service::AgentApi {
                     pool,
                     ca,
-                    sessions: Default::default(),
+                    sessions,
                     settings,
                 }))
                 .serve(agent_listen);
