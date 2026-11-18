@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+// Types shared by the Agent and Operator services.
+// Compatibility: additive changes only within v1; never renumber or reuse a
+// field number, and mark removed fields `reserved`.
+// Fields that can be unknown are `optional`: absent means unknown, never 0.
+package rustyrmm.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// The descriptive snapshot of an Endpoint.
+message Inventory {
+  google.protobuf.Timestamp collected_at = 1;
+  string hostname = 2;
+  // SMBIOS UUID; empty when unreadable. Not an identity: clones may share it.
+  string system_uuid = 3;
+  // IANA timezone name, e.g. "Europe/Berlin".
+  string timezone = 4;
+  OsInfo os = 5;
+  CpuInfo cpu = 6;
+  uint64 memory_total_bytes = 7;
+  repeated DiskInfo disks = 8;
+  repeated NetworkInterface interfaces = 9;
+  UpdateStatus updates = 10;
+  string agent_version = 11;
+}
+
+message OsInfo {
+  string name = 1;
+  string family = 2;
+  string version = 3;
+  optional string virt_system = 4;
+  optional string virt_role = 5;
+}
+
+message CpuInfo {
+  string brand = 1;
+  string vendor = 2;
+  optional uint32 family = 3;
+  optional uint32 model = 4;
+  uint32 core_count = 5;
+  uint32 thread_count = 6;
+}
+
+message DiskInfo {
+  string name = 1;
+  string mount_point = 2;
+  uint64 total_bytes = 3;
+}
+
+message NetworkInterface {
+  string name = 1;
+  optional uint64 link_speed_bps = 2;
+  repeated string ipv4 = 3;
+  repeated string ipv6 = 4;
+}
+
+// Pending OS updates. Absent counts are unknown (e.g. security on macOS).
+message UpdateStatus {
+  optional uint32 regular = 1;
+  optional uint32 security = 2;
+}
+
+// One point-in-time Monitoring measurement from an Endpoint.
+message Sample {
+  google.protobuf.Timestamp collected_at = 1;
+  float cpu_usage_percent = 2;
+  uint64 memory_used_bytes = 3;
+  uint64 memory_total_bytes = 4;
+  repeated DiskSample disks = 5;
+  repeated InterfaceSample interfaces = 6;
+}
+
+message DiskSample {
+  string name = 1;
+  uint64 used_bytes = 2;
+  uint64 read_bytes_per_sec = 3;
+  uint64 write_bytes_per_sec = 4;
+}
+
+message InterfaceSample {
+  string name = 1;
+  uint64 rx_bytes_per_sec = 2;
+  uint64 tx_bytes_per_sec = 3;
+  optional uint64 link_speed_bps = 4;
+}
+
+message ProcessInfo {
+  uint32 pid = 1;
+  optional uint32 ppid = 2;
+  string name = 3;
+  string state = 4;
+  uint64 memory_bytes = 5;
+  float cpu_usage_percent = 6;
+  uint64 disk_read_bytes_per_sec = 7;
+  uint64 disk_write_bytes_per_sec = 8;
+  repeated string command_line = 9;
+}
+
+enum Interpreter {
+  INTERPRETER_UNSPECIFIED = 0;
+  INTERPRETER_SH = 1;
+  INTERPRETER_BASH = 2;
+  INTERPRETER_POWERSHELL = 3;
+  INTERPRETER_CMD = 4;
+}
+
+// An Operator's request to run something on an Endpoint. Runs at most once.
+message Command {
+  // Server-generated UUIDv7.
+  string id = 1;
+  Interpreter interpreter = 2;
+  string script = 3;
+  uint32 timeout_seconds = 4;
+}
+
+message CommandResult {
+  string id = 1;
+  // Absent when the process was killed (timeout or signal).
+  optional int32 exit_code = 2;
+  // Raw bytes: output is not guaranteed to be UTF-8. Capped by the Agent.
+  bytes stdout = 3;
+  bytes stderr = 4;
+  bool truncated = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+}
