@@ -18,4 +18,4 @@ path-guid = "55BD66B4-393D-4F83-B454-23E20F7334E6"
 [dependencies]
 rustyrmm-proto = {path = "../rustyrmm-proto"}
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
-tonic = "0.10.2"
+tonic = "0.12.3"
