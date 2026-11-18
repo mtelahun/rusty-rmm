@@ -20,6 +20,14 @@ eula = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.104"
+argon2 = "0.6.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.8", features = ["derive", "env"] }
+rpassword = "7.5.5"
 rustyrmm-proto = {path = "../rustyrmm-proto"}
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "chrono", "macros"] }
+thiserror = "2.0.21"
 tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
 tonic = "0.14"
+uuid = { version = "1.29.3", features = ["v7"] }
