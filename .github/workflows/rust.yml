@@ -52,6 +52,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  web-ui:
+    name: Web UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rustyrmm-web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: rustyrmm-web/package-lock.json
+      - run: npm ci
+      # Generates the client from the protos, type-checks, and bundles.
+      - run: npm run build
+
   agent-other-os:
     # The Agent ships for Windows and macOS too; build, lint and unit-test it there.
     name: Agent (${{ matrix.os }})

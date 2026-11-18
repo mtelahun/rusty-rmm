@@ -725,6 +725,15 @@ pub fn tls_config(cert_pem: &str, key_pem: &str) -> tonic::transport::ServerTlsC
         .identity(tonic::transport::Identity::from_pem(cert_pem, key_pem))
 }
 
+/// The Operator gRPC service, with the embedded web UI behind it for every other path.
+fn web_routes(api: OperatorApi) -> tonic::service::Routes {
+    use rustyrmm_proto::operator::v1::operator_service_server::OperatorServiceServer;
+    tonic::service::Routes::new(OperatorServiceServer::new(api))
+        .into_axum_router()
+        .fallback(crate::web_ui::serve)
+        .into()
+}
+
 /// Serves the Operator port on `listener`: TLS (HTTP/2 via ALPN, which browsers use), grpc-web, and the
 /// grpc-web mark (outside tonic-web, which rewrites the content type) that the cookie rule needs.
 /// No CORS layer: only same-origin pages (the embedded web UI) can call it from a browser.
@@ -733,14 +742,13 @@ pub async fn serve(
     tls: tonic::transport::ServerTlsConfig,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    use rustyrmm_proto::operator::v1::operator_service_server::OperatorServiceServer;
     tonic::transport::Server::builder()
         .tls_config(tls)?
         .layer(tower::util::MapRequestLayer::new(|req| {
             auth::mark_grpc_web(req)
         }))
         .layer(tonic_web::GrpcWebLayer::new())
-        .add_service(OperatorServiceServer::new(api))
+        .add_routes(web_routes(api))
         .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
         .await?;
     Ok(())
