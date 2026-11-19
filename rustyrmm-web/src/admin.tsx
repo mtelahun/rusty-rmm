@@ -269,7 +269,7 @@ function InstallCommands({ created, onDismiss }: { created: CreatePairingTokenRe
 export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmation, setConfirmation] = useState("");
+  const [shown, setShown] = useState(false); // Instead of a confirm field: the Operator can check for typos.
   const [error, setError] = useState("");
   const [added, setAdded] = useState("");
   const [busy, setBusy] = useState(false);
@@ -278,10 +278,6 @@ export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
   const submit = (e: Event) => {
     e.preventDefault();
     setAdded("");
-    if (password !== confirmation) {
-      setError("The passwords do not match.");
-      return;
-    }
     setBusy(true);
     setError("");
     api
@@ -290,7 +286,7 @@ export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
         setAdded(username);
         setUsername("");
         setPassword("");
-        setConfirmation("");
+        setShown(false);
       })
       .catch(failed)
       .finally(() => {
@@ -316,7 +312,7 @@ export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
         <label>
           Password (at least 12 characters)
           <input
-            type="password"
+            {...(shown ? { type: "text" as const } : { type: "password" as const })}
             autocomplete="new-password"
             minLength={12}
             value={password}
@@ -326,17 +322,15 @@ export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
             required
           />
         </label>
-        <label>
-          Confirm password
+        <label class="check">
           <input
-            type="password"
-            autocomplete="new-password"
-            value={confirmation}
-            onInput={(e) => {
-              setConfirmation(e.currentTarget.value);
+            type="checkbox"
+            checked={shown}
+            onChange={(e) => {
+              setShown(e.currentTarget.checked);
             }}
-            required
           />
+          Show password
         </label>
         {error && <p class="error" role="alert">{error}</p>}
         {added && <p role="status">Added Operator {added}.</p>}

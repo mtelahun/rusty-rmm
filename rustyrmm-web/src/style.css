@@ -271,3 +271,9 @@ tr.selected {
   padding: 0 1rem 1rem;
   margin: 1rem 0;
 }
+
+.stack label.check {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
