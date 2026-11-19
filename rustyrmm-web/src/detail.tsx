@@ -5,7 +5,12 @@ import { Interpreter, type ProcessInfo, type Sample } from "./gen/rustyrmm/commo
 import { CommandStatus, type CommandRecord, type Endpoint } from "./gen/rustyrmm/operator/v1/operator_pb";
 import { all, api, message, needsLogin, when } from "./api";
 
-const RANGES: Record<string, number> = { "1 hour": 3600, "24 hours": 86400, "7 days": 7 * 86400, "30 days": 30 * 86400 };
+const RANGES: [number, string][] = [
+  [3600, "1 hour"],
+  [86400, "24 hours"],
+  [7 * 86400, "7 days"],
+  [30 * 86400, "30 days"],
+];
 
 const INTERPRETERS: [Interpreter, string][] = [
   [Interpreter.SH, "sh"],
@@ -144,13 +149,13 @@ function Inventory({ endpoint }: { endpoint: Endpoint }) {
 }
 
 function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
-  const [range, setRange] = useState("1 hour");
+  const [range, setRange] = useState(3600); // Seconds.
   const [data, setData] = useState<{ from: number; to: number; samples: Sample[] } | undefined>(undefined);
 
   useEffect(() => {
     const load = () => {
       const to = Date.now();
-      const from = to - (RANGES[range] ?? 3600) * 1000;
+      const from = to - range * 1000;
       void all(async (pageToken) => {
         const r = await api.listSamples({
           endpointId: id,
@@ -174,9 +179,9 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
   }, [id, range]);
 
   const samples = data?.samples ?? [];
-  const sum = <T,>(f: (s: Sample) => T[], g: (x: T) => bigint) =>
-    samples.map((s) => f(s).reduce((a, x) => a + Number(g(x)), 0));
-  const props = { from: data?.from ?? 0, to: data?.to ?? 1, times: samples.map((s) => ms(s.collectedAt)) };
+  const line = (f: (s: Sample) => number) => samples.map((s): [number, number] => [ms(s.collectedAt), f(s)]);
+  const sum = <T,>(f: (s: Sample) => T[], g: (x: T) => bigint) => line((s) => f(s).reduce((a, x) => a + Number(g(x)), 0));
+  const props = { from: data?.from ?? 0, to: data?.to ?? 1 };
 
   return (
     <section>
@@ -187,12 +192,12 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
           <select
             value={range}
             onChange={(e) => {
-              setRange(e.currentTarget.value);
+              setRange(Number(e.currentTarget.value));
             }}
           >
-            {Object.keys(RANGES).map((r) => (
-              <option key={r} value={r}>
-                {r}
+            {RANGES.map(([secs, label]) => (
+              <option key={secs} value={secs}>
+                {label}
               </option>
             ))}
           </select>
@@ -204,7 +209,7 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
         <p class="muted">No Samples in this range.</p>
       ) : (
         <div class="charts">
-          <Chart {...props} title="CPU" max={100} format={pct} series={[{ label: "used", values: samples.map((s) => s.cpuUsagePercent) }]} />
+          <Chart {...props} title="CPU" max={100} format={pct} series={[{ label: "used", points: line((s) => s.cpuUsagePercent) }]} />
           <Chart
             {...props}
             title="Memory"
@@ -213,7 +218,7 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
             series={[
               {
                 label: "used",
-                values: samples.map((s) => (s.memoryTotalBytes ? (Number(s.memoryUsedBytes) / Number(s.memoryTotalBytes)) * 100 : 0)),
+                points: line((s) => (s.memoryTotalBytes ? (Number(s.memoryUsedBytes) / Number(s.memoryTotalBytes)) * 100 : 0)),
               },
             ]}
           />
@@ -222,8 +227,8 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
             title="Disk"
             format={rate}
             series={[
-              { label: "read", values: sum((s) => s.disks, (d) => d.readBytesPerSec) },
-              { label: "write", values: sum((s) => s.disks, (d) => d.writeBytesPerSec) },
+              { label: "read", points: sum((s) => s.disks, (d) => d.readBytesPerSec) },
+              { label: "write", points: sum((s) => s.disks, (d) => d.writeBytesPerSec) },
             ]}
           />
           <Chart
@@ -231,8 +236,8 @@ function Charts({ id, failed }: { id: string; failed: (e: unknown) => void }) {
             title="Network"
             format={rate}
             series={[
-              { label: "in", values: sum((s) => s.interfaces, (i) => i.rxBytesPerSec) },
-              { label: "out", values: sum((s) => s.interfaces, (i) => i.txBytesPerSec) },
+              { label: "in", points: sum((s) => s.interfaces, (i) => i.rxBytesPerSec) },
+              { label: "out", points: sum((s) => s.interfaces, (i) => i.txBytesPerSec) },
             ]}
           />
         </div>
@@ -249,12 +254,11 @@ function Chart(p: {
   title: string;
   from: number;
   to: number;
-  times: number[];
-  series: { label: string; values: number[] }[];
+  series: { label: string; points: [number, number][] }[]; // [time in ms, value]
   max?: number;
   format: (v: number) => string;
 }) {
-  const top = p.max ?? Math.max(1, ...p.series.flatMap((s) => s.values));
+  const top = p.max ?? Math.max(1, ...p.series.flatMap((s) => s.points.map(([, v]) => v)));
   const x = (t: number) => (((t - p.from) / (p.to - p.from)) * W).toFixed(1);
   const y = (v: number) => (H - (Math.min(v, top) / top) * H).toFixed(1);
   return (
@@ -262,7 +266,7 @@ function Chart(p: {
       <figcaption>
         <strong>{p.title}</strong>{" "}
         {p.series.map((s, i) => {
-          const last = s.values.at(-1);
+          const last = s.points.at(-1)?.[1];
           return (
             <Fragment key={s.label}>
               {" "}
@@ -276,7 +280,7 @@ function Chart(p: {
       </figcaption>
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${p.title} chart`}>
         {p.series.map((s, i) => (
-          <polyline key={s.label} class={`line key${i}`} points={s.values.map((v, j) => `${x(p.times[j] ?? 0)},${y(v)}`).join(" ")} />
+          <polyline key={s.label} class={`line key${i}`} points={s.points.map(([t, v]) => `${x(t)},${y(v)}`).join(" ")} />
         ))}
       </svg>
     </figure>
