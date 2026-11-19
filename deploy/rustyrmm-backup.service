@@ -1,0 +1,8 @@
+[Unit]
+Description=RustyRMM backup (pg_dump + state dir to restic)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/rustyrmm/backup.env
+ExecStart=/usr/local/sbin/rustyrmm-backup
