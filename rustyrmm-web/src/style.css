@@ -229,3 +229,45 @@ pre {
   overflow-x: auto;
   white-space: pre-wrap;
 }
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+nav a {
+  text-decoration: none;
+}
+
+nav a[aria-current="page"] {
+  text-decoration: underline;
+}
+
+form.inline {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.stack {
+  max-width: 24rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.stack label {
+  display: grid;
+  gap: 0.25rem;
+}
+
+tr.selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.notice {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0 1rem 1rem;
+  margin: 1rem 0;
+}

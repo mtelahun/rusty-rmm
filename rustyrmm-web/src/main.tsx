@@ -2,6 +2,7 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { Endpoint, Environment } from "./gen/rustyrmm/operator/v1/operator_pb";
 import { all, api, message, needsLogin, when } from "./api";
+import { Environments, Operators } from "./admin";
 import { EndpointDetail } from "./detail";
 import "./style.css";
 
@@ -30,10 +31,23 @@ function App() {
   if (loggedIn === undefined) return <p class="muted">Loading…</p>;
   if (!loggedIn) return <Login onDone={() => setLoggedIn(true)} />;
   const detailId = /^#\/endpoints\/([^/]+)$/.exec(hash)?.[1];
+  const endSession = () => {
+    setLoggedIn(false);
+  };
+  const nav = (href: string, label: string, active: boolean) => (
+    <a href={href} aria-current={active ? "page" : undefined}>
+      {label}
+    </a>
+  );
   return (
     <>
       <header>
-        <strong>RustyRMM</strong>
+        <nav>
+          <strong>RustyRMM</strong>
+          {nav("#", "Endpoints", hash === "" || hash === "#" || detailId !== undefined)}
+          {nav("#/environments", "Environments", hash === "#/environments")}
+          {nav("#/operators", "Operators", hash === "#/operators")}
+        </nav>
         <button
           onClick={() => {
             void api.logout({}).catch(() => {}).finally(() => setLoggedIn(false));
@@ -43,9 +57,13 @@ function App() {
         </button>
       </header>
       {detailId ? (
-        <EndpointDetail id={detailId} onSessionEnded={() => setLoggedIn(false)} />
+        <EndpointDetail id={detailId} onSessionEnded={endSession} />
+      ) : hash === "#/environments" ? (
+        <Environments onSessionEnded={endSession} />
+      ) : hash === "#/operators" ? (
+        <Operators onSessionEnded={endSession} />
       ) : (
-        <Endpoints onSessionEnded={() => setLoggedIn(false)} />
+        <Endpoints onSessionEnded={endSession} />
       )}
     </>
   );
