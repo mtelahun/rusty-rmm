@@ -116,3 +116,116 @@ button:disabled {
 .login input {
   padding: 0.45rem;
 }
+
+a {
+  color: var(--accent);
+}
+
+section {
+  margin-top: 1.5rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+button.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+}
+
+.inventory {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.inventory dt {
+  color: var(--muted);
+}
+
+.inventory dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  align-items: end; /* Charts line up even when a caption wraps. */
+  gap: 1rem;
+}
+
+.chart {
+  margin: 0;
+}
+
+.chart svg {
+  width: 100%;
+  height: 8rem;
+  border: 1px solid var(--line);
+}
+
+.line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.key {
+  margin-left: 0.5rem;
+}
+
+.key0 {
+  color: var(--accent);
+}
+
+.key1 {
+  color: var(--ok);
+}
+
+.scroll {
+  overflow: auto;
+  max-height: 30rem;
+}
+
+.scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+
+.cmdline {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.command {
+  display: grid;
+  gap: 0.75rem;
+}
+
+textarea {
+  font-family: ui-monospace, monospace;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.history {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0;
+}
+
+.history summary {
+  cursor: pointer;
+}
+
+pre {
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+  padding: 0.5rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}

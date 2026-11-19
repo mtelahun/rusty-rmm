@@ -2,11 +2,23 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import type { Endpoint, Environment } from "./gen/rustyrmm/operator/v1/operator_pb";
 import { all, api, message, needsLogin, when } from "./api";
+import { EndpointDetail } from "./detail";
 import "./style.css";
 
 function App() {
   // undefined = still checking whether the cookie session is valid.
   const [loggedIn, setLoggedIn] = useState<boolean | undefined>(undefined);
+  const [hash, setHash] = useState(location.hash);
+
+  useEffect(() => {
+    const onHash = () => {
+      setHash(location.hash);
+    };
+    addEventListener("hashchange", onHash);
+    return () => {
+      removeEventListener("hashchange", onHash);
+    };
+  }, []);
 
   useEffect(() => {
     api
@@ -17,6 +29,7 @@ function App() {
 
   if (loggedIn === undefined) return <p class="muted">Loading…</p>;
   if (!loggedIn) return <Login onDone={() => setLoggedIn(true)} />;
+  const detailId = /^#\/endpoints\/([^/]+)$/.exec(hash)?.[1];
   return (
     <>
       <header>
@@ -29,7 +42,11 @@ function App() {
           Log out
         </button>
       </header>
-      <Endpoints onSessionEnded={() => setLoggedIn(false)} />
+      {detailId ? (
+        <EndpointDetail id={detailId} onSessionEnded={() => setLoggedIn(false)} />
+      ) : (
+        <Endpoints onSessionEnded={() => setLoggedIn(false)} />
+      )}
     </>
   );
 }
@@ -122,7 +139,9 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
           <select value={environmentId} onChange={(e) => setEnvironmentId(e.currentTarget.value)}>
             <option value="">All</option>
             {environments.map((e) => (
-              <option value={e.id}>{e.name}</option>
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
             ))}
           </select>
         </label>
@@ -151,7 +170,9 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
                     {e.revoked ? "Revoked" : e.online ? "Online" : "Offline"}
                   </span>
                 </td>
-                <td>{e.hostname || <span class="muted">(not reported yet)</span>}</td>
+                <td>
+                  <a href={`#/endpoints/${e.id}`}>{e.hostname || <span class="muted">(not reported yet)</span>}</a>
+                </td>
                 <td>{envName(e.environmentId)}</td>
                 <td>{e.inventory?.os?.name ?? ""}</td>
                 <td>{e.online ? "now" : when(e.lastSeenAt)}</td>
