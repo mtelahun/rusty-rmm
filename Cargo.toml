@@ -27,6 +27,8 @@ pr-run-mode = "plan"
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Steps run before building (the web UI must exist for release builds of the Server)
+github-build-setup = "../build-setup.yml"
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
