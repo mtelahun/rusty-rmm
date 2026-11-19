@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Nightly backup: pg_dump + the Server state dir (holds the CA key) to restic.
+# Needs RESTIC_REPOSITORY, RESTIC_PASSWORD and the S3 keys in the environment.
+set -euo pipefail
+
+dump_dir=/var/backups/rustyrmm
+install -d -m 0700 "$dump_dir"
+sudo -u postgres pg_dump --format=custom rustyrmm > "$dump_dir/rustyrmm.dump"
+
+# Fixed --host so snapshots stay in one group if the VM is rebuilt.
+restic backup --host rustyrmm "$dump_dir" /var/lib/rustyrmm
+restic forget --host rustyrmm --keep-daily 14 --prune

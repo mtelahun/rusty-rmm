@@ -1,0 +1,31 @@
+[Unit]
+Description=RustyRMM Server
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+User=rustyrmm
+Group=rustyrmm
+EnvironmentFile=/etc/rustyrmm/server.env
+ExecStart=/opt/rustyrmm/bin/rustyrmm-server serve \
+    --agent-name ${RUSTYRMM_HOSTNAME} \
+    --operator-listen 0.0.0.0:443 \
+    --operator-cert /etc/rustyrmm/operator.crt \
+    --operator-key /etc/rustyrmm/operator.key \
+    --state-dir /var/lib/rustyrmm
+# Bind 443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Holds the Agent CA key.
+StateDirectory=rustyrmm
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
