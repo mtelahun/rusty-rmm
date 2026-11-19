@@ -8,8 +8,8 @@ use rustyrmm_proto::common::v1::{
     ProcessInfo, Sample,
 };
 use sysinfo::{
-    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessesToUpdate, Product, RefreshKind,
-    System,
+    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind, ProcessesToUpdate,
+    Product, RefreshKind, System, UpdateKind,
 };
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
@@ -220,9 +220,17 @@ pub fn process_list() -> Vec<ProcessInfo> {
     let Ok(mut system) = System::new() else {
         return Vec::new();
     };
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    // `refresh_processes` leaves `cmd` unloaded, so ask for the same kinds plus the command line.
+    let kind = ProcessRefreshKind::nothing()
+        .with_memory()
+        .with_cpu()
+        .with_disk_usage()
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        .with_tasks()
+        .with_cmd(UpdateKind::OnlyIfNotSet);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
     std::thread::sleep(WINDOW);
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
     let per_sec = |bytes: u64| (bytes as f64 / WINDOW.as_secs_f64()) as u64;
     let mut list: Vec<ProcessInfo> = system
         .processes()
@@ -345,6 +353,14 @@ mod tests {
         assert!(s.memory_used_bytes <= s.memory_total_bytes);
         assert!((0.0..=100.0).contains(&s.cpu_usage_percent));
         assert!(s.collected_at.is_some());
+    }
+
+    #[test]
+    fn process_list_includes_command_lines() {
+        let me = std::process::id();
+        let list = process_list();
+        let this = list.iter().find(|p| p.pid == me).unwrap();
+        assert!(!this.command_line.is_empty());
     }
 
     // The static part only: the update check goes over the network and has its own tests.
