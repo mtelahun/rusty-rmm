@@ -238,7 +238,7 @@ function InstallCommands({ created, onDismiss }: { created: CreatePairingTokenRe
     ["Linux / macOS", `curl --proto '=https' --tlsv1.2 -LsSf ${RELEASES}/rustyrmm-agent-installer.sh | sh && sudo ~/.cargo/bin/rustyrmm-agent ${pair}`],
     [
       "Windows (admin PowerShell)",
-      `powershell -ExecutionPolicy Bypass -c "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm ${RELEASES}/rustyrmm-agent-installer.ps1 | iex"; & "$env:USERPROFILE\\.cargo\\bin\\rustyrmm-agent.exe" ${pair}`,
+      `[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm ${RELEASES}/rustyrmm-agent-installer.ps1 | iex; & "$env:USERPROFILE\\.cargo\\bin\\rustyrmm-agent.exe" ${pair}`,
     ],
   ];
   return (
