@@ -198,6 +198,19 @@ async fn operator_pairs_an_agent_and_runs_a_command(pool: PgPool) {
         "Endpoint never came Online with a hostname"
     );
 
+    // The Agent samples every 500ms, so at least one Sample arrives shortly.
+    let mut samples = 0;
+    for _ in 0..100 {
+        let (r, h) = (rig.clone(), hostname.clone());
+        let list = blocking(move || r.json(&["samples", &h])).await;
+        samples = list.as_array().unwrap().len();
+        if samples > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(samples > 0, "Endpoint never reported a Sample");
+
     // `run` by hostname prints the output and exits with the remote exit code.
     let (r, h) = (rig.clone(), hostname.clone());
     let run =
