@@ -57,7 +57,7 @@ certbot runs standalone on port 80. The deploy hook copies the certificate and k
 
 ```sh
 apt install -y certbot
-install -m 0755 deploy/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/rustyrmm.sh
+install -D -m 0755 deploy/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/rustyrmm.sh
 certbot certonly --standalone -d "$RMM_HOST" --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/rustyrmm.sh
 ```
 
