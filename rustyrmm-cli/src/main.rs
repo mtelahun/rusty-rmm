@@ -271,7 +271,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     let releases =
                         concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest/download");
                     let unix = format!("curl --proto '=https' --tlsv1.2 -LsSf {releases}/rustyrmm-agent-installer.sh | sh && sudo ~/.cargo/bin/rustyrmm-agent {pair}");
-                    let windows = format!("powershell -ExecutionPolicy Bypass -c \"irm {releases}/rustyrmm-agent-installer.ps1 | iex\"; & \"$env:USERPROFILE\\.cargo\\bin\\rustyrmm-agent.exe\" {pair}");
+                    let windows = format!("powershell -ExecutionPolicy Bypass -c \"[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm {releases}/rustyrmm-agent-installer.ps1 | iex\"; & \"$env:USERPROFILE\\.cargo\\bin\\rustyrmm-agent.exe\" {pair}");
                     println!(
                         "{}",
                         details(
