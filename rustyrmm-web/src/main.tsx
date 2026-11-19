@@ -22,9 +22,8 @@ function App() {
       <header>
         <strong>RustyRMM</strong>
         <button
-          onClick={async () => {
-            await api.logout({}).catch(() => {});
-            setLoggedIn(false);
+          onClick={() => {
+            void api.logout({}).catch(() => {}).finally(() => setLoggedIn(false));
           }}
         >
           Log out
@@ -57,7 +56,7 @@ function Login({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <form class="login" onSubmit={submit}>
+    <form class="login" onSubmit={(e) => { void submit(e); }}>
       <h1>RustyRMM</h1>
       <label>
         Username
@@ -79,7 +78,10 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
   const [endpoints, setEndpoints] = useState<Endpoint[] | undefined>(undefined);
   const [error, setError] = useState("");
 
-  const failed = (e: unknown) => (needsLogin(e) ? onSessionEnded() : setError(message(e)));
+  const failed = (e: unknown) => {
+    if (needsLogin(e)) onSessionEnded();
+    else setError(message(e));
+  };
 
   useEffect(() => {
     all(async (pageToken) => {
@@ -91,8 +93,8 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
   }, []);
 
   useEffect(() => {
-    const load = () =>
-      all(async (pageToken) => {
+    const load = () => {
+      void all(async (pageToken) => {
         const r = await api.listEndpoints({ environmentId: environmentId || undefined, pageToken });
         return { items: r.endpoints, next: r.nextPageToken };
       })
@@ -101,9 +103,12 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
           setError("");
         })
         .catch(failed);
+    };
     load();
     const timer = setInterval(load, 30_000); // Online status changes; refresh like the charts will.
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+    };
   }, [environmentId]);
 
   const envName = (id: string) => environments.find((e) => e.id === id)?.name ?? "";
@@ -159,4 +164,5 @@ function Endpoints({ onSessionEnded }: { onSessionEnded: () => void }) {
   );
 }
 
-render(<App />, document.getElementById("app")!);
+const root = document.getElementById("app");
+if (root) render(<App />, root);
