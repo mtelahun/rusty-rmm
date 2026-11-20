@@ -20,7 +20,7 @@ function failHandler(onSessionEnded: () => void, setError: (m: string) => void) 
   };
 }
 
-export function Environments({ onSessionEnded }: { onSessionEnded: () => void }) {
+export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSessionEnded: () => void }) {
   const [environments, setEnvironments] = useState<Environment[] | undefined>(undefined);
   const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
@@ -58,6 +58,7 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
     <main>
       <div class="toolbar">
         <h2>Environments</h2>
+        {isAdmin && (
         <form class="inline" onSubmit={create}>
           <input
             aria-label="New Environment name"
@@ -70,6 +71,7 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
           />
           <button type="submit">Create</button>
         </form>
+        )}
       </div>
       {error && <p class="error" role="alert">{error}</p>}
       {environments === undefined ? (

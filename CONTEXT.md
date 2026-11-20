@@ -17,11 +17,15 @@ The central RustyRMM management service that Agents connect to.
 _Avoid_: Backend, master
 
 **Operator**:
-A human who uses the Server to observe and act on Endpoints.
+A human who uses the Server to observe and act on Endpoints. Belongs to the Administrator group or not, and to zero or more Environments.
 _Avoid_: User, admin
 
+**Administrator group (Admin group)**:
+The built-in group of Operators who access every Environment and manage Operators, Environments and membership. The first Operator is an Admin; the last Admin can't be removed.
+_Avoid_: Root, superuser
+
 **Environment**:
-A named group of Endpoints, such as a customer or site, on a single Server shared by all Operators. Not a security boundary.
+A named group of Endpoints, such as a customer or site, on a single Server. An access boundary: Administrators access every Environment; other Operators only the ones they belong to.
 _Avoid_: Tenant, organization, group
 
 **Pairing**:

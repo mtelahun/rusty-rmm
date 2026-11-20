@@ -4,7 +4,9 @@ syntax = "proto3";
 // call is unary. Authentication: `authorization: Bearer <token>` metadata, or
 // for grpc-web requests the session cookie set by Login.
 // Errors use standard gRPC codes: UNAVAILABLE (Endpoint Offline),
-// UNAUTHENTICATED, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED.
+// UNAUTHENTICATED, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED,
+// PERMISSION_DENIED (not an Admin, or not a member of the Environment) and
+// FAILED_PRECONDITION (removing the last Admin).
 // All ids are Server-generated UUIDv7 strings.
 package rustyrmm.operator.v1;
 
@@ -15,7 +17,17 @@ import "rustyrmm/common/v1/common.proto";
 service OperatorService {
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // Admin only.
   rpc AddOperator(AddOperatorRequest) returns (AddOperatorResponse);
+  // The calling Operator.
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  // The rest of the Operator management RPCs are Admin only.
+  rpc ListOperators(ListOperatorsRequest) returns (ListOperatorsResponse);
+  // Idempotent. FAILED_PRECONDITION when removing the last Admin.
+  rpc SetAdmin(SetAdminRequest) returns (SetAdminResponse);
+  // Both idempotent.
+  rpc AddEnvironmentMember(EnvironmentMemberRequest) returns (EnvironmentMemberResponse);
+  rpc RemoveEnvironmentMember(EnvironmentMemberRequest) returns (EnvironmentMemberResponse);
 
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
@@ -63,6 +75,35 @@ message AddOperatorRequest {
 message AddOperatorResponse {
   string operator_id = 1;
 }
+
+message WhoAmIRequest {}
+message WhoAmIResponse {
+  string username = 1;
+  bool is_admin = 2;
+}
+
+message ListOperatorsRequest {}
+message OperatorInfo {
+  string username = 1;
+  bool is_admin = 2;
+  // Environments the Operator is a member of (Admins reach all regardless).
+  repeated string environment_ids = 3;
+}
+message ListOperatorsResponse {
+  repeated OperatorInfo operators = 1;
+}
+
+message SetAdminRequest {
+  string username = 1;
+  bool is_admin = 2;
+}
+message SetAdminResponse {}
+
+message EnvironmentMemberRequest {
+  string environment_id = 1;
+  string username = 2;
+}
+message EnvironmentMemberResponse {}
 
 // --- Environments ---
 

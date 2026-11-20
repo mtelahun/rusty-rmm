@@ -99,7 +99,28 @@ enum Cmd {
 #[derive(Subcommand)]
 enum EnvCmd {
     List,
-    Create { name: String },
+    Create {
+        name: String,
+    },
+    /// Which Operators belong to an Environment (Admins only).
+    Member {
+        #[command(subcommand)]
+        command: MemberCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemberCmd {
+    Add {
+        /// Environment name or id.
+        environment: String,
+        username: String,
+    },
+    Remove {
+        /// Environment name or id.
+        environment: String,
+        username: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -158,6 +179,19 @@ enum OperatorCmd {
         #[arg(long)]
         password_stdin: bool,
     },
+    /// List Operators with their Admin flag and Environments (Admins only).
+    List,
+    /// Add or remove an Operator from the Admin group.
+    Admin {
+        #[command(subcommand)]
+        command: AdminCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminCmd {
+    Add { username: String },
+    Remove { username: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -237,6 +271,35 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                         .map_err(status)?
                         .into_inner();
                     println!("{}", details(&[("name", e.name), ("id", e.id)], json));
+                }
+                EnvCmd::Member { command } => {
+                    let (add, environment, username) = match command {
+                        MemberCmd::Add {
+                            environment,
+                            username,
+                        } => (true, environment, username),
+                        MemberCmd::Remove {
+                            environment,
+                            username,
+                        } => (false, environment, username),
+                    };
+                    let environment_id = environment_id(&mut api, &environment).await?;
+                    let req = api.req(EnvironmentMemberRequest {
+                        environment_id,
+                        username: username.clone(),
+                    });
+                    if add {
+                        api.client.add_environment_member(req).await
+                    } else {
+                        api.client.remove_environment_member(req).await
+                    }
+                    .map_err(status)?;
+                    let (verb, prep) = if add {
+                        ("Added", "to")
+                    } else {
+                        ("Removed", "from")
+                    };
+                    println!("{verb} {username} {prep} {environment}");
                 }
             }
         }
@@ -587,6 +650,52 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .map_err(status)?
                 .into_inner();
             println!("Added Operator {username} ({})", r.operator_id);
+        }
+        Cmd::Operator {
+            command: OperatorCmd::List,
+        } => {
+            let mut api = Api::from_saved().await?;
+            let req = api.req(ListOperatorsRequest {});
+            let r = api
+                .client
+                .list_operators(req)
+                .await
+                .map_err(status)?
+                .into_inner();
+            let names: std::collections::HashMap<_, _> = environments(&mut api)
+                .await?
+                .into_iter()
+                .map(|e| (e.id, e.name))
+                .collect();
+            let mut t = Table::new(&["username", "admin", "environments"]);
+            for o in r.operators {
+                let envs: Vec<_> = o
+                    .environment_ids
+                    .iter()
+                    .map(|id| names.get(id).unwrap_or(id).as_str())
+                    .collect();
+                t.row(vec![o.username, o.is_admin.to_string(), envs.join(", ")]);
+            }
+            println!("{}", t.render(json));
+        }
+        Cmd::Operator {
+            command: OperatorCmd::Admin { command },
+        } => {
+            let (username, is_admin) = match command {
+                AdminCmd::Add { username } => (username, true),
+                AdminCmd::Remove { username } => (username, false),
+            };
+            let mut api = Api::from_saved().await?;
+            let req = api.req(SetAdminRequest {
+                username: username.clone(),
+                is_admin,
+            });
+            api.client.set_admin(req).await.map_err(status)?;
+            let verb = if is_admin { "Added" } else { "Removed" };
+            println!(
+                "{verb} {username} {} the Admin group",
+                if is_admin { "to" } else { "from" }
+            );
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -9,6 +9,9 @@ import "./style.css";
 function App() {
   // undefined = still checking whether the cookie session is valid.
   const [loggedIn, setLoggedIn] = useState<boolean | undefined>(undefined);
+  const [isAdmin, setIsAdmin] = useState(false);
+  // A non-Admin who belongs to no Environment can't do anything yet.
+  const [noAccess, setNoAccess] = useState(false);
   const [hash, setHash] = useState(location.hash);
 
   useEffect(() => {
@@ -21,15 +24,21 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
+  const check = () => {
     api
-      .listEnvironments({ pageSize: 1 })
-      .then(() => setLoggedIn(true))
+      .whoAmI({})
+      .then(async (me) => {
+        const r = await api.listEnvironments({ pageSize: 1 });
+        setIsAdmin(me.isAdmin);
+        setNoAccess(!me.isAdmin && r.environments.length === 0);
+        setLoggedIn(true);
+      })
       .catch((e) => setLoggedIn(needsLogin(e) ? false : true));
-  }, []);
+  };
+  useEffect(check, []);
 
   if (loggedIn === undefined) return <p class="muted">Loading…</p>;
-  if (!loggedIn) return <Login onDone={() => setLoggedIn(true)} />;
+  if (!loggedIn) return <Login onDone={check} />;
   const detailId = /^#\/endpoints\/([^/]+)$/.exec(hash)?.[1];
   const endSession = () => {
     setLoggedIn(false);
@@ -59,9 +68,13 @@ function App() {
       {detailId ? (
         <EndpointDetail id={detailId} onSessionEnded={endSession} />
       ) : hash === "#/environments" ? (
-        <Environments onSessionEnded={endSession} />
+        <Environments isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : hash === "#/operators" ? (
         <Operators onSessionEnded={endSession} />
+      ) : noAccess ? (
+        <main>
+          <p class="muted">You do not have access to any Environments. Ask an Administrator to add you.</p>
+        </main>
       ) : (
         <Endpoints onSessionEnded={endSession} />
       )}
