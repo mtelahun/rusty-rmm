@@ -24,6 +24,7 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
   const [environments, setEnvironments] = useState<Environment[] | undefined>(undefined);
   const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
+  const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const failed = failHandler(onSessionEnded, setError);
 
@@ -43,9 +44,10 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
   const create = (e: Event) => {
     e.preventDefault();
     api
-      .createEnvironment({ name })
+      .createEnvironment({ name, owner })
       .then((env) => {
         setName("");
+        setOwner("");
         setSelected(env.id);
         load();
       })
@@ -68,6 +70,15 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
             }}
             required
           />
+          <input
+            aria-label="Owner (optional)"
+            placeholder="Owner (optional)"
+            maxLength={200}
+            value={owner}
+            onInput={(e) => {
+              setOwner(e.currentTarget.value);
+            }}
+          />
           <button type="submit">Create</button>
         </form>
       </div>
@@ -81,6 +92,7 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
           <thead>
             <tr>
               <th>Name</th>
+              <th>Owner</th>
               <th>Created</th>
             </tr>
           </thead>
@@ -98,14 +110,39 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
                     {env.name}
                   </a>
                 </td>
+                <td>{env.owner}</td>
                 <td>{when(env.createdAt)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+      {current && <OwnerForm key={current.id} environment={current} saved={load} failed={failed} />}
       {current && <PairingTokens key={current.id} environment={current} failed={failed} />}
     </main>
+  );
+}
+
+function OwnerForm({ environment, saved, failed }: { environment: Environment; saved: () => void; failed: (e: unknown) => void }) {
+  const [owner, setOwner] = useState(environment.owner);
+  const save = (e: Event) => {
+    e.preventDefault();
+    api.updateEnvironment({ id: environment.id, owner }).then(saved).catch(failed);
+  };
+  return (
+    <form class="inline" onSubmit={save}>
+      <label>
+        Owner{" "}
+        <input
+          maxLength={200}
+          value={owner}
+          onInput={(e) => {
+            setOwner(e.currentTarget.value);
+          }}
+        />
+      </label>
+      <button type="submit">Save</button>
+    </form>
   );
 }
 

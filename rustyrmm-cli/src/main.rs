@@ -99,7 +99,18 @@ enum Cmd {
 #[derive(Subcommand)]
 enum EnvCmd {
     List,
-    Create { name: String },
+    Create {
+        name: String,
+        /// Free-text label, such as the customer or site.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Set or clear (leave out the owner) an Environment's owner label.
+    SetOwner {
+        /// Environment name or id.
+        environment: String,
+        owner: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,21 +233,42 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let mut api = Api::from_saved().await?;
             match command {
                 EnvCmd::List => {
-                    let mut t = Table::new(&["name", "id", "created"]);
+                    let mut t = Table::new(&["name", "owner", "id", "created"]);
                     for e in environments(&mut api).await? {
-                        t.row(vec![e.name, e.id, time(e.created_at.as_ref())]);
+                        t.row(vec![e.name, e.owner, e.id, time(e.created_at.as_ref())]);
                     }
                     println!("{}", t.render(json));
                 }
-                EnvCmd::Create { name } => {
-                    let req = api.req(CreateEnvironmentRequest { name });
+                EnvCmd::Create { name, owner } => {
+                    let owner = owner.unwrap_or_default();
+                    let req = api.req(CreateEnvironmentRequest { name, owner });
                     let e = api
                         .client
                         .create_environment(req)
                         .await
                         .map_err(status)?
                         .into_inner();
-                    println!("{}", details(&[("name", e.name), ("id", e.id)], json));
+                    println!(
+                        "{}",
+                        details(&[("name", e.name), ("id", e.id), ("owner", e.owner)], json)
+                    );
+                }
+                EnvCmd::SetOwner { environment, owner } => {
+                    let id = environment_id(&mut api, &environment).await?;
+                    let req = api.req(UpdateEnvironmentRequest {
+                        id,
+                        owner: owner.unwrap_or_default(),
+                    });
+                    let e = api
+                        .client
+                        .update_environment(req)
+                        .await
+                        .map_err(status)?
+                        .into_inner();
+                    println!(
+                        "{}",
+                        details(&[("name", e.name), ("id", e.id), ("owner", e.owner)], json)
+                    );
                 }
             }
         }
