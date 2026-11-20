@@ -21,7 +21,7 @@ A human who uses the Server to observe and act on Endpoints.
 _Avoid_: User, admin
 
 **Environment**:
-A named group of Endpoints, such as a customer or site, on a single Server shared by all Operators. Not a security boundary.
+A named group of Endpoints, such as a customer or site, on a single Server shared by all Operators. May have an optional free-text owner (the customer or site it belongs to), which is a label only. Not a security boundary.
 _Avoid_: Tenant, organization, group
 
 **Pairing**:

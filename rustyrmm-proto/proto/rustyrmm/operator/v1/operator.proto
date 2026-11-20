@@ -18,6 +18,7 @@ service OperatorService {
   rpc AddOperator(AddOperatorRequest) returns (AddOperatorResponse);
 
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
+  rpc UpdateEnvironment(UpdateEnvironmentRequest) returns (Environment);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
 
   rpc CreatePairingToken(CreatePairingTokenRequest) returns (CreatePairingTokenResponse);
@@ -70,10 +71,19 @@ message Environment {
   string id = 1;
   string name = 2;
   google.protobuf.Timestamp created_at = 3;
+  // Free-text label (customer or site); empty when there is none.
+  string owner = 4;
 }
 
 message CreateEnvironmentRequest {
   string name = 1;
+  string owner = 2;
+}
+
+// Only sets the owner; an empty owner clears it.
+message UpdateEnvironmentRequest {
+  string id = 1;
+  string owner = 2;
 }
 
 message ListEnvironmentsRequest {

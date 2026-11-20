@@ -126,7 +126,7 @@ On the Server host (or anywhere with the `rustyrmm` CLI), create an Environment 
 
 ```sh
 rustyrmm login https://$RMM_HOST
-rustyrmm env create "Home"
+rustyrmm env create "Home"   # optionally: --owner "<customer or site>"
 rustyrmm pairing-token create Home
 ```
 

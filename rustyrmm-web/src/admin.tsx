@@ -24,6 +24,7 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
   const [environments, setEnvironments] = useState<Environment[] | undefined>(undefined);
   const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
+  const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const failed = failHandler(onSessionEnded, setError);
 
@@ -43,9 +44,10 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
   const create = (e: Event) => {
     e.preventDefault();
     api
-      .createEnvironment({ name })
+      .createEnvironment({ name, owner })
       .then((env) => {
         setName("");
+        setOwner("");
         setSelected(env.id);
         load();
       })
@@ -68,6 +70,15 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
             }}
             required
           />
+          <input
+            aria-label="Owner (optional)"
+            placeholder="Owner (optional)"
+            maxLength={200}
+            value={owner}
+            onInput={(e) => {
+              setOwner(e.currentTarget.value);
+            }}
+          />
           <button type="submit">Create</button>
         </form>
       </div>
@@ -77,35 +88,68 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
       ) : environments.length === 0 ? (
         <p class="muted">No Environments yet. Create one to start pairing Endpoints.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {environments.map((env) => (
-              <tr key={env.id} class={env.id === selected ? "selected" : ""}>
-                <td>
-                  <a
-                    href="#/environments"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setSelected(env.id);
-                    }}
-                  >
-                    {env.name}
-                  </a>
-                </td>
-                <td>{when(env.createdAt)}</td>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Owner</th>
+                <th>Created</th>
               </tr>
-            ))}
-          </tbody>
+            </thead>
+            <tbody>
+              {environments.map((env) => (
+                <tr key={env.id} class={env.id === selected ? "selected" : ""}>
+                  <td>
+                    <a
+                      href="#/environments"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setSelected(env.id);
+                      }}
+                    >
+                      {env.name}
+                    </a>
+                  </td>
+                  <td>{env.owner}</td>
+                  <td>{when(env.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
         </table>
+        </div>
       )}
+      {current && <OwnerForm key={current.id} environment={current} saved={load} failed={failed} />}
       {current && <PairingTokens key={current.id} environment={current} failed={failed} />}
     </main>
+  );
+}
+
+function OwnerForm({ environment, saved, failed }: { environment: Environment; saved: () => void; failed: (e: unknown) => void }) {
+  const [owner, setOwner] = useState(environment.owner);
+  const save = (e: Event) => {
+    e.preventDefault();
+    api.updateEnvironment({ id: environment.id, owner }).then(saved).catch(failed);
+  };
+  return (
+    <section>
+      <div class="toolbar">
+        <h3>Owner for {environment.name}</h3>
+        <form class="inline" onSubmit={save}>
+          <label>
+            Owner{" "}
+            <input
+              maxLength={200}
+              value={owner}
+              onInput={(e) => {
+                setOwner(e.currentTarget.value);
+              }}
+            />
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+    </section>
   );
 }
 
