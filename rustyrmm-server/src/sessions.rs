@@ -12,6 +12,8 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tonic::Status;
 use uuid::Uuid;
 
+use crate::tunnels::Tunnels;
+
 pub type Outbound = mpsc::Sender<Result<ServerMessage, Status>>;
 type ProcessListReply = oneshot::Sender<Vec<ProcessInfo>>;
 
@@ -51,6 +53,7 @@ pub struct Sessions {
     next_id: AtomicU64,
     /// Process-list requests awaiting the Agent's reply, keyed by (Endpoint, request id).
     pending_process_lists: Mutex<HashMap<(Uuid, String), ProcessListReply>>,
+    pub tunnels: Tunnels,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -91,6 +94,12 @@ impl Sessions {
     pub fn sender(&self, endpoint_id: Uuid) -> Option<Outbound> {
         let live = self.live.lock().unwrap();
         live.get(&endpoint_id).map(|h| h.outbound.clone())
+    }
+
+    /// The live Session's id and outbound channel, if the Endpoint is Online.
+    pub fn session(&self, endpoint_id: Uuid) -> Option<(u64, Outbound)> {
+        let live = self.live.lock().unwrap();
+        live.get(&endpoint_id).map(|h| (h.id, h.outbound.clone()))
     }
 
     /// Asks the Endpoint for its process list and waits up to `wait` for the reply.

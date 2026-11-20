@@ -41,6 +41,22 @@ cargo test --workspace --locked
 (cd rustyrmm-web && npm ci && npm run build)
 ```
 
+## Tunnels
+
+An Operator opens a Tunnel from the CLI to a port on an Endpoint's loopback. Opening
+needs a permission, off by default; any Operator can grant it:
+
+```bash
+rustyrmm operator tunnels <username> --allow          # or --deny
+rustyrmm tunnel open <endpoint> <port> [--listen-port N] [--bind ADDR]  # until Ctrl-C
+rustyrmm tunnel list                                  # your Tunnels
+rustyrmm tunnel close <tunnel-id>
+```
+
+`tunnel open` listens on `127.0.0.1` (OS-chosen port unless `--listen-port`) and prints the
+Tunnel id and address. The Tunnel ends with the CLI process, `tunnel close`, or the Endpoint's
+Session.
+
 ## Software factory
 
 `/factory run` builds every open GitHub issue labeled `factory` through

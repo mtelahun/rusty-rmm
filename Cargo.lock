@@ -2159,6 +2159,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "uuid",
 ]

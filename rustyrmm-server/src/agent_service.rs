@@ -170,13 +170,34 @@ async fn run_session(
             Some(agent_message::Message::ProcessList(list)) => {
                 sessions.complete_process_list(endpoint_id, list)
             }
+            Some(agent_message::Message::TunnelData(d)) => {
+                sessions
+                    .tunnels
+                    .data_from_agent(endpoint_id, &d.connection_id, d.data)
+                    .await
+            }
+            Some(agent_message::Message::TunnelClose(c)) => {
+                sessions
+                    .tunnels
+                    .close_from_agent(endpoint_id, &c.connection_id, String::new())
+                    .await
+            }
+            // Success needs no relay: the CLI just starts sending data.
+            Some(agent_message::Message::TunnelOpenResult(r)) if !r.error.is_empty() => {
+                sessions
+                    .tunnels
+                    .close_from_agent(endpoint_id, &r.connection_id, r.error)
+                    .await
+            }
             // Heartbeats only keep the Session alive; a repeated Hello is ignored.
             Some(agent_message::Message::Heartbeat(_))
             | Some(agent_message::Message::Hello(_))
+            | Some(agent_message::Message::TunnelOpenResult(_))
             | None => {}
         }
     }
     sessions.remove(endpoint_id, registration.id);
+    sessions.tunnels.end_session(endpoint_id, registration.id);
     log_err(ingest::touch_last_seen(&pool, endpoint_id).await);
 }
 

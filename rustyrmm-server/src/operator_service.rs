@@ -11,8 +11,9 @@ use rustyrmm_proto::common::v1::{
 use rustyrmm_proto::operator::v1::operator_service_server::OperatorService;
 use rustyrmm_proto::operator::v1::*;
 use sqlx::PgPool;
+use tonic::codegen::BoxStream;
 use tonic::metadata::MetadataValue;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 use crate::auth::{self, authenticate, internal};
@@ -20,6 +21,7 @@ use crate::commands::{self, DispatchError, NewCommand};
 use crate::operators::{self, AddOperatorError};
 use crate::pairing;
 use crate::sessions::{LiveError, Sessions};
+use crate::tunnels;
 
 pub const DEFAULT_PAIRING_TOKEN_TTL: chrono::Duration = chrono::Duration::days(7);
 const DEFAULT_PAGE_SIZE: u32 = 100;
@@ -89,6 +91,122 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(AddOperatorResponse {
             operator_id: id.to_string(),
         }))
+    }
+
+    async fn set_tunnel_permission(
+        &self,
+        req: Request<SetTunnelPermissionRequest>,
+    ) -> Result<Response<SetTunnelPermissionResponse>, Status> {
+        authenticate(&self.pool, &req).await?;
+        let SetTunnelPermissionRequest { username, allowed } = req.into_inner();
+        let updated = sqlx::query("UPDATE operators SET may_open_tunnels = $2 WHERE username = $1")
+            .bind(&username)
+            .bind(allowed)
+            .execute(&self.pool)
+            .await
+            .map_err(internal)?;
+        if updated.rows_affected() == 0 {
+            return Err(Status::not_found(format!("no Operator named {username:?}")));
+        }
+        Ok(Response::new(SetTunnelPermissionResponse {}))
+    }
+
+    type OpenTunnelStream = BoxStream<TunnelServerMessage>;
+
+    async fn open_tunnel(
+        &self,
+        req: Request<Streaming<TunnelClientMessage>>,
+    ) -> Result<Response<Self::OpenTunnelStream>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let allowed: bool =
+            sqlx::query_scalar("SELECT may_open_tunnels FROM operators WHERE id = $1")
+                .bind(operator.id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(internal)?;
+        if !allowed {
+            return Err(Status::permission_denied(
+                "you are not allowed to open Tunnels",
+            ));
+        }
+        let mut from_cli = req.into_inner();
+        let open = match tokio::time::timeout(PROCESS_LIST_WAIT, from_cli.message()).await {
+            Ok(Ok(Some(TunnelClientMessage {
+                message: Some(tunnel_client_message::Message::Open(open)),
+            }))) => open,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "the first message must open the Tunnel",
+                ))
+            }
+        };
+        let endpoint_id = parse_id(&open.endpoint_id, "endpoint_id")?;
+        let port = u16::try_from(open.port)
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| Status::invalid_argument("port must be 1 to 65535"))?;
+        let Some((session_id, to_agent)) = self.sessions.session(endpoint_id) else {
+            return Err(self.live_error(endpoint_id, LiveError::Offline).await);
+        };
+
+        let (to_cli, rx) = tokio::sync::mpsc::channel(16);
+        let (tunnel_id, close) =
+            self.sessions
+                .tunnels
+                .open(operator.id, endpoint_id, session_id, port, to_cli.clone());
+        let opened = tunnel_server_message::Message::Opened(TunnelOpened {
+            tunnel_id: tunnel_id.to_string(),
+        });
+        let _ = to_cli
+            .send(Ok(TunnelServerMessage {
+                message: Some(opened),
+            }))
+            .await;
+        // The registry holds the only `to_cli` sender, so removing the Tunnel ends the stream.
+        drop(to_cli);
+        tokio::spawn(tunnels::relay(
+            self.sessions.clone(),
+            tunnel_id,
+            port,
+            close,
+            to_agent,
+            from_cli,
+        ));
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    async fn list_tunnels(
+        &self,
+        req: Request<ListTunnelsRequest>,
+    ) -> Result<Response<ListTunnelsResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let tunnels = self
+            .sessions
+            .tunnels
+            .list(operator.id)
+            .into_iter()
+            .map(|t| TunnelInfo {
+                id: t.id.to_string(),
+                endpoint_id: t.endpoint_id.to_string(),
+                port: t.port.into(),
+                opened_at: Some(ts(t.opened_at)),
+            })
+            .collect();
+        Ok(Response::new(ListTunnelsResponse { tunnels }))
+    }
+
+    async fn close_tunnel(
+        &self,
+        req: Request<CloseTunnelRequest>,
+    ) -> Result<Response<CloseTunnelResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let id = parse_id(&req.into_inner().tunnel_id, "tunnel_id")?;
+        if !self.sessions.tunnels.close(operator.id, id) {
+            return Err(Status::not_found("no such Tunnel"));
+        }
+        Ok(Response::new(CloseTunnelResponse {}))
     }
 
     async fn create_environment(
@@ -1111,6 +1229,199 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let reg = sessions.register(ep, tx);
         (rx, reg)
+    }
+
+    fn open_msg(endpoint_id: Uuid, port: u32) -> TunnelClientMessage {
+        TunnelClientMessage {
+            message: Some(tunnel_client_message::Message::Open(OpenTunnelRequest {
+                endpoint_id: endpoint_id.to_string(),
+                port,
+            })),
+        }
+    }
+
+    async fn open_tunnel_as(
+        client: &mut OperatorServiceClient<Channel>,
+        token: &str,
+        first: TunnelClientMessage,
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Sender<TunnelClientMessage>,
+            Streaming<TunnelServerMessage>,
+        ),
+        Status,
+    > {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.send(first).await.unwrap();
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let out = client
+            .open_tunnel(authed(stream, token))
+            .await?
+            .into_inner();
+        Ok((tx, out))
+    }
+
+    #[sqlx::test]
+    async fn tunnels_need_permission_and_are_owner_scoped(pool: PgPool) {
+        use rustyrmm_proto::agent::v1::server_message::Message as ToAgent;
+        let (mut client, pool, sessions) = start_with_sessions(pool).await;
+        operators::add_operator(&pool, "bob", PASSWORD)
+            .await
+            .unwrap();
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let ep = env_and_endpoints(&pool, &["a"]).await[0];
+
+        // Off by default.
+        let denied = open_tunnel_as(&mut client, &admin, open_msg(ep, 22)).await;
+        assert_eq!(denied.err().unwrap().code(), tonic::Code::PermissionDenied);
+        let set = |username: &str, allowed| SetTunnelPermissionRequest {
+            username: username.into(),
+            allowed,
+        };
+        let missing = client
+            .set_tunnel_permission(authed(set("nobody", true), &admin))
+            .await;
+        assert_eq!(missing.err().unwrap().code(), tonic::Code::NotFound);
+        for who in ["admin", "bob"] {
+            client
+                .set_tunnel_permission(authed(set(who, true), &admin))
+                .await
+                .unwrap();
+        }
+
+        // Bad port, and an Endpoint that is Offline or unknown.
+        let bad = open_tunnel_as(&mut client, &admin, open_msg(ep, 70000)).await;
+        assert_eq!(bad.err().unwrap().code(), tonic::Code::InvalidArgument);
+        let offline = open_tunnel_as(&mut client, &admin, open_msg(ep, 22)).await;
+        assert_eq!(offline.err().unwrap().code(), tonic::Code::Unavailable);
+        let unknown = open_tunnel_as(&mut client, &admin, open_msg(Uuid::now_v7(), 22)).await;
+        assert_eq!(unknown.err().unwrap().code(), tonic::Code::NotFound);
+
+        // Online: the first reply carries the Tunnel id; connections relay to the Agent.
+        let (mut agent_rx, reg) = online(&sessions, ep);
+        let (to_server, mut from_server) = open_tunnel_as(&mut client, &admin, open_msg(ep, 22))
+            .await
+            .unwrap();
+        let Some(tunnel_server_message::Message::Opened(opened)) =
+            from_server.message().await.unwrap().unwrap().message
+        else {
+            panic!("expected Opened");
+        };
+        let send = |m| TunnelClientMessage { message: Some(m) };
+        let conn = |id| {
+            tunnel_client_message::Message::ConnectionOpen(ConnectionOpen { connection_id: id })
+        };
+        to_server.send(send(conn(1))).await.unwrap();
+        to_server.send(send(conn(2))).await.unwrap();
+        to_server
+            .send(send(tunnel_client_message::Message::Data(ConnectionData {
+                connection_id: 1,
+                data: b"hi".to_vec(),
+            })))
+            .await
+            .unwrap();
+        let Some(ToAgent::TunnelOpen(open)) = agent_rx.recv().await.unwrap().unwrap().message
+        else {
+            panic!("expected TunnelOpen");
+        };
+        assert_eq!(
+            (open.port, open.tunnel_id.as_str()),
+            (22, opened.tunnel_id.as_str())
+        );
+        let Some(ToAgent::TunnelOpen(second)) = agent_rx.recv().await.unwrap().unwrap().message
+        else {
+            panic!("expected TunnelOpen");
+        };
+        let Some(ToAgent::TunnelData(data)) = agent_rx.recv().await.unwrap().unwrap().message
+        else {
+            panic!("expected TunnelData");
+        };
+        assert_eq!(
+            (data.connection_id, data.data),
+            (open.connection_id.clone(), b"hi".to_vec())
+        );
+
+        // Bytes from the Agent reach the CLI; a connection failing leaves the Tunnel up.
+        sessions
+            .tunnels
+            .data_from_agent(ep, &open.connection_id, b"yo".to_vec())
+            .await;
+        let Some(tunnel_server_message::Message::Data(d)) =
+            from_server.message().await.unwrap().unwrap().message
+        else {
+            panic!("expected Data");
+        };
+        assert_eq!((d.connection_id, d.data), (1, b"yo".to_vec()));
+        sessions
+            .tunnels
+            .close_from_agent(ep, &second.connection_id, "refused".into())
+            .await;
+        let Some(tunnel_server_message::Message::ConnectionClose(c)) =
+            from_server.message().await.unwrap().unwrap().message
+        else {
+            panic!("expected ConnectionClose");
+        };
+        assert_eq!((c.connection_id, c.error.as_str()), (2, "refused"));
+        // Another Endpoint cannot write into this Tunnel's connections.
+        sessions
+            .tunnels
+            .data_from_agent(Uuid::now_v7(), &open.connection_id, b"x".to_vec())
+            .await;
+        let list = |token: &str| authed(ListTunnelsRequest {}, token).into_inner();
+        let mine = client
+            .list_tunnels(authed(list(&admin), &admin))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(mine.tunnels.len(), 1);
+        assert_eq!(
+            (mine.tunnels[0].port, mine.tunnels[0].endpoint_id.as_str()),
+            (22, ep.to_string().as_str())
+        );
+
+        // Bob sees none of it and cannot close it.
+        let theirs = client
+            .list_tunnels(authed(list(&bob), &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(theirs.tunnels.is_empty());
+        let close = |id: &str| CloseTunnelRequest {
+            tunnel_id: id.into(),
+        };
+        let stolen = client
+            .close_tunnel(authed(close(&opened.tunnel_id), &bob))
+            .await;
+        assert_eq!(stolen.err().unwrap().code(), tonic::Code::NotFound);
+
+        // The owner closes it: the stream ends and the Agent is told to close its connections.
+        client
+            .close_tunnel(authed(close(&opened.tunnel_id), &admin))
+            .await
+            .unwrap();
+        assert!(from_server.message().await.unwrap().is_none());
+        assert!(agent_rx.recv().await.unwrap().unwrap().message.is_some());
+        let mine = client
+            .list_tunnels(authed(list(&admin), &admin))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(mine.tunnels.is_empty());
+
+        // A Session ending removes the Tunnel.
+        let (_to_server, mut from_server) = open_tunnel_as(&mut client, &admin, open_msg(ep, 22))
+            .await
+            .unwrap();
+        from_server.message().await.unwrap().unwrap();
+        sessions.tunnels.end_session(ep, reg.id);
+        assert!(from_server.message().await.unwrap().is_none());
+        let mine = client
+            .list_tunnels(authed(list(&admin), &admin))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(mine.tunnels.is_empty());
     }
 
     #[sqlx::test]

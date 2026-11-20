@@ -49,6 +49,9 @@ message AgentMessage {
     rustyrmm.common.v1.Sample sample = 4;
     rustyrmm.common.v1.CommandResult command_result = 5;
     ProcessList process_list = 6;
+    TunnelData tunnel_data = 7;
+    TunnelClose tunnel_close = 8;
+    TunnelOpenResult tunnel_open_result = 9;
   }
 }
 
@@ -69,6 +72,9 @@ message ServerMessage {
     HelloAck hello_ack = 1;
     rustyrmm.common.v1.Command command = 2;
     ProcessListRequest process_list_request = 3;
+    TunnelOpen tunnel_open = 4;
+    TunnelData tunnel_data = 5;
+    TunnelClose tunnel_close = 6;
   }
 }
 
@@ -80,4 +86,28 @@ message HelloAck {
 
 message ProcessListRequest {
   string request_id = 1;
+}
+
+// Tunnels: a connection the Operator's CLI accepted is relayed to a port on the
+// Endpoint's loopback. The Agent only ever dials 127.0.0.1, so a message carries no address.
+// connection_id is unique per Endpoint and chosen by the Server.
+message TunnelOpen {
+  string tunnel_id = 1;
+  string connection_id = 2;
+  uint32 port = 3;
+}
+
+message TunnelData {
+  string connection_id = 1;
+  bytes data = 2;
+}
+
+message TunnelClose {
+  string connection_id = 1;
+}
+
+// The Agent's answer to TunnelOpen; `error` is empty on success.
+message TunnelOpenResult {
+  string connection_id = 1;
+  string error = 2;
 }

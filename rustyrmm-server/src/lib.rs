@@ -11,4 +11,5 @@ pub mod operator_service;
 pub mod operators;
 pub mod pairing;
 pub mod sessions;
+pub mod tunnels;
 pub mod web_ui;

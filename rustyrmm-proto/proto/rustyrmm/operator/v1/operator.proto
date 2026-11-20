@@ -1,10 +1,12 @@
 syntax = "proto3";
 
 // Served on the Server's Operator port (public-CA TLS, tonic-web), so every
-// call is unary. Authentication: `authorization: Bearer <token>` metadata, or
+// call is unary except OpenTunnel, which is streaming and native-gRPC only (not
+// grpc-web). Authentication: `authorization: Bearer <token>` metadata, or
 // for grpc-web requests the session cookie set by Login.
 // Errors use standard gRPC codes: UNAVAILABLE (Endpoint Offline),
-// UNAUTHENTICATED, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED.
+// UNAUTHENTICATED, NOT_FOUND, INVALID_ARGUMENT, DEADLINE_EXCEEDED,
+// PERMISSION_DENIED (no permission to open Tunnels).
 // All ids are Server-generated UUIDv7 strings.
 package rustyrmm.operator.v1;
 
@@ -16,6 +18,9 @@ service OperatorService {
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc Logout(LogoutRequest) returns (LogoutResponse);
   rpc AddOperator(AddOperatorRequest) returns (AddOperatorResponse);
+  // Grants or revokes an Operator's permission to open Tunnels (default off).
+  // NOT_FOUND for an unknown username.
+  rpc SetTunnelPermission(SetTunnelPermissionRequest) returns (SetTunnelPermissionResponse);
 
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
@@ -38,6 +43,16 @@ service OperatorService {
   rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
   rpc GetCommand(GetCommandRequest) returns (CommandRecord);
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+
+  // A local Tunnel to a port on an Endpoint's loopback. The first client message must
+  // be `open`; the first reply is `opened`. The Tunnel lasts as long as the stream.
+  // PERMISSION_DENIED without the Tunnel permission; NOT_FOUND for an unknown Endpoint;
+  // UNAVAILABLE when the Endpoint is Offline or Revoked.
+  rpc OpenTunnel(stream TunnelClientMessage) returns (stream TunnelServerMessage);
+  // The calling Operator's own Tunnels.
+  rpc ListTunnels(ListTunnelsRequest) returns (ListTunnelsResponse);
+  // NOT_FOUND for another Operator's Tunnel.
+  rpc CloseTunnel(CloseTunnelRequest) returns (CloseTunnelResponse);
 }
 
 // --- Operators ---
@@ -243,3 +258,75 @@ message ListCommandsResponse {
   repeated CommandRecord commands = 1;
   string next_page_token = 2;
 }
+
+// --- Tunnels ---
+
+message SetTunnelPermissionRequest {
+  string username = 1;
+  bool allowed = 2;
+}
+
+message SetTunnelPermissionResponse {}
+
+message OpenTunnelRequest {
+  string endpoint_id = 1;
+  // 1..=65535, on the Endpoint's loopback.
+  uint32 port = 2;
+}
+
+// Connection ids are chosen by the CLI and only need to be unique within the Tunnel.
+message ConnectionOpen {
+  uint64 connection_id = 1;
+}
+
+message ConnectionData {
+  uint64 connection_id = 1;
+  bytes data = 2;
+}
+
+// Either side closing one connection; the Tunnel stays up. `error` is set when
+// the Endpoint could not connect (for example connection refused).
+message ConnectionClose {
+  uint64 connection_id = 1;
+  string error = 2;
+}
+
+message TunnelClientMessage {
+  oneof message {
+    OpenTunnelRequest open = 1;
+    ConnectionOpen connection_open = 2;
+    ConnectionData data = 3;
+    ConnectionClose connection_close = 4;
+  }
+}
+
+message TunnelOpened {
+  string tunnel_id = 1;
+}
+
+message TunnelServerMessage {
+  oneof message {
+    TunnelOpened opened = 1;
+    ConnectionData data = 2;
+    ConnectionClose connection_close = 3;
+  }
+}
+
+message TunnelInfo {
+  string id = 1;
+  string endpoint_id = 2;
+  uint32 port = 3;
+  google.protobuf.Timestamp opened_at = 4;
+}
+
+message ListTunnelsRequest {}
+
+message ListTunnelsResponse {
+  repeated TunnelInfo tunnels = 1;
+}
+
+message CloseTunnelRequest {
+  string tunnel_id = 1;
+}
+
+message CloseTunnelResponse {}

@@ -5,6 +5,8 @@ Download client installer from specially crafted url to associate an endpoint wi
 
 ## Tunneling
 Create local or remote tunnels through an endpoint. A local tunnel talks to a port on the endpoint. A remote tunnel talks to a host on a network reachable by the endpoint but not directly accessable from the management server.
+- Local tunnels: done (`rustyrmm tunnel open`; needs the per-Operator Tunnel permission).
+- Remote tunnels: planned. Limited to hosts on the Endpoint's own subnets or an allow list.
 
 ## Endpoint Information
 Get information about the Endpoint:

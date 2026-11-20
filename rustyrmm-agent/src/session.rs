@@ -20,6 +20,7 @@ use crate::commands::{self, Outbox};
 use crate::pairing::host;
 use crate::state::Paired;
 use crate::telemetry;
+use crate::tunnel::Connections;
 
 /// Sent in Hello; the Server refuses Agents below its minimum.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -116,6 +117,7 @@ pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Resu
     let mut renew_check = interval(RENEW_CHECK_EVERY);
     // Results already sent in this Session; everything else retained gets (re)sent.
     let mut sent: HashSet<String> = HashSet::new();
+    let mut connections = Connections::default();
     send_new_results(&tx, outbox, &mut sent).await?;
 
     loop {
@@ -147,6 +149,9 @@ pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Resu
                             let _ = tx.send(message(agent_message::Message::ProcessList(list))).await;
                         });
                     }
+                    Some(server_message::Message::TunnelOpen(open)) => connections.open(&tx, open),
+                    Some(server_message::Message::TunnelData(data)) => connections.data(data).await,
+                    Some(server_message::Message::TunnelClose(close)) => connections.close(close),
                     Some(server_message::Message::HelloAck(_)) | None => {}
                 },
             },

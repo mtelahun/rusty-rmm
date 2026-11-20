@@ -1,5 +1,6 @@
 mod output;
 mod session;
+mod tunnel;
 
 use std::io::Read;
 use std::process::ExitCode;
@@ -89,6 +90,11 @@ enum Cmd {
         #[command(subcommand)]
         command: CommandCmd,
     },
+    /// Tunnels from a local port to a port on an Endpoint's loopback.
+    Tunnel {
+        #[command(subcommand)]
+        command: TunnelCmd,
+    },
     /// Operators.
     Operator {
         #[command(subcommand)]
@@ -151,7 +157,37 @@ enum CommandCmd {
 }
 
 #[derive(Subcommand)]
+enum TunnelCmd {
+    /// Listen locally and relay each connection to the Endpoint's 127.0.0.1:<port>. Runs until Ctrl-C.
+    Open {
+        /// Endpoint id or hostname.
+        endpoint: String,
+        /// The port on the Endpoint.
+        port: u32,
+        /// Local port to listen on (0 picks a free one).
+        #[arg(long, default_value_t = 0)]
+        listen_port: u16,
+        /// Local address to listen on.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
+    /// Your open Tunnels.
+    List,
+    Close {
+        tunnel_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum OperatorCmd {
+    /// Allow or deny an Operator opening Tunnels.
+    Tunnels {
+        username: String,
+        #[arg(long, required_unless_present = "deny")]
+        allow: bool,
+        #[arg(long, conflicts_with = "allow")]
+        deny: bool,
+    },
     /// Add an Operator; prompts for their password.
     Add {
         username: String,
@@ -567,6 +603,70 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             }
         }
+        Cmd::Tunnel {
+            command:
+                TunnelCmd::Open {
+                    endpoint,
+                    port,
+                    listen_port,
+                    bind,
+                },
+        } => {
+            let mut api = Api::from_saved().await?;
+            let endpoint_id = endpoint_by_ref(&mut api, &endpoint).await?.id;
+            tunnel::open(&mut api, endpoint_id, port, &bind, listen_port, json).await?;
+        }
+        Cmd::Tunnel {
+            command: TunnelCmd::List,
+        } => {
+            let mut api = Api::from_saved().await?;
+            let r = api
+                .client
+                .list_tunnels(api.req(ListTunnelsRequest {}))
+                .await
+                .map_err(status)?
+                .into_inner();
+            let mut t = Table::new(&["id", "endpoint", "port", "opened"]);
+            for tunnel in r.tunnels {
+                t.row(vec![
+                    tunnel.id,
+                    tunnel.endpoint_id,
+                    tunnel.port.to_string(),
+                    time(tunnel.opened_at.as_ref()),
+                ]);
+            }
+            println!("{}", t.render(json));
+        }
+        Cmd::Tunnel {
+            command: TunnelCmd::Close { tunnel_id },
+        } => {
+            let mut api = Api::from_saved().await?;
+            let req = api.req(CloseTunnelRequest {
+                tunnel_id: tunnel_id.clone(),
+            });
+            api.client.close_tunnel(req).await.map_err(status)?;
+            println!("Closed Tunnel {tunnel_id}");
+        }
+        Cmd::Operator {
+            command:
+                OperatorCmd::Tunnels {
+                    username,
+                    allow,
+                    deny: _,
+                },
+        } => {
+            let mut api = Api::from_saved().await?;
+            let req = api.req(SetTunnelPermissionRequest {
+                username: username.clone(),
+                allowed: allow,
+            });
+            api.client
+                .set_tunnel_permission(req)
+                .await
+                .map_err(status)?;
+            let verb = if allow { "may now" } else { "may no longer" };
+            println!("{username} {verb} open Tunnels");
+        }
         Cmd::Operator {
             command:
                 OperatorCmd::Add {
@@ -810,7 +910,7 @@ fn yes_no(b: bool) -> String {
 }
 
 /// The Server's error message, without tonic's wrapping.
-fn status(s: Status) -> anyhow::Error {
+pub(crate) fn status(s: Status) -> anyhow::Error {
     anyhow::anyhow!("{} ({:?})", s.message(), s.code())
 }
 

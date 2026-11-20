@@ -52,6 +52,10 @@ _Avoid_: Enrollment key, invite
 The state of an Endpoint whose Agent is no longer allowed to open a Session.
 _Avoid_: Disabled, banned, blocked
 
+**Tunnel**:
+An Operator-opened relay from a local port of the CLI, through the Server, to a port on an Endpoint's loopback. It lasts as long as the CLI process, and only Operators with the Tunnel permission can open one.
+_Avoid_: Proxy, port forward
+
 **Inventory**:
 The descriptive snapshot of an Endpoint: hardware, OS, network and update status. Contrast with a Sample, which is a point-in-time measurement.
 _Avoid_: Endpoint Information, facts, specs
