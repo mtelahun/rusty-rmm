@@ -96,7 +96,9 @@ impl OperatorService for OperatorApi {
         req: Request<CreateEnvironmentRequest>,
     ) -> Result<Response<Environment>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
-        let name = req.into_inner().name.trim().to_owned();
+        let req = req.into_inner();
+        let name = req.name.trim().to_owned();
+        let owner = normalise_owner(&req.owner)?;
         if name.is_empty() {
             return Err(Status::invalid_argument(
                 "Environment name must not be empty",
@@ -104,10 +106,11 @@ impl OperatorService for OperatorApi {
         }
         let id = Uuid::now_v7();
         let created_at: DateTime<Utc> = sqlx::query_scalar(
-            "INSERT INTO environments (id, name) VALUES ($1, $2) RETURNING created_at",
+            "INSERT INTO environments (id, name, owner) VALUES ($1, $2, $3) RETURNING created_at",
         )
         .bind(id)
         .bind(&name)
+        .bind(&owner)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| match e {
@@ -120,6 +123,35 @@ impl OperatorService for OperatorApi {
             id: id.to_string(),
             name,
             created_at: Some(ts(created_at)),
+            owner: owner.unwrap_or_default(),
+        }))
+    }
+
+    async fn update_environment(
+        &self,
+        req: Request<UpdateEnvironmentRequest>,
+    ) -> Result<Response<Environment>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let id = parse_id(&req.id, "id")?;
+        let owner = normalise_owner(&req.owner)?;
+        self.require_environment(&operator, id).await?;
+        let (id, name, created_at, owner): (Uuid, String, DateTime<Utc>, Option<String>) =
+            sqlx::query_as(
+                "UPDATE environments SET owner = $2 WHERE id = $1
+                 RETURNING id, name, created_at, owner",
+            )
+            .bind(id)
+            .bind(owner)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| Status::not_found("no such Environment"))?;
+        Ok(Response::new(Environment {
+            id: id.to_string(),
+            name,
+            created_at: Some(ts(created_at)),
+            owner: owner.unwrap_or_default(),
         }))
     }
 
@@ -130,8 +162,8 @@ impl OperatorService for OperatorApi {
         let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let page = Page::new(req.page_size, &req.page_token)?;
-        let rows: Vec<(Uuid, String, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT id, name, created_at FROM environments
+        let rows: Vec<(Uuid, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
+            "SELECT id, name, created_at, owner FROM environments
              WHERE ($1::uuid IS NULL OR id > $1)
                AND ($3 OR id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
              ORDER BY id LIMIT $2",
@@ -147,10 +179,11 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(ListEnvironmentsResponse {
             environments: rows
                 .into_iter()
-                .map(|(id, name, created_at)| Environment {
+                .map(|(id, name, created_at, owner)| Environment {
                     id: id.to_string(),
                     name,
                     created_at: Some(ts(created_at)),
+                    owner: owner.unwrap_or_default(),
                 })
                 .collect(),
             next_page_token,
@@ -912,6 +945,22 @@ impl Page {
     }
 }
 
+/// Trims an owner label; empty means none. Rejects over 200 chars or control characters.
+fn normalise_owner(owner: &str) -> Result<Option<String>, Status> {
+    let owner = owner.trim();
+    if owner.chars().count() > 200 {
+        return Err(Status::invalid_argument(
+            "owner must be at most 200 characters",
+        ));
+    }
+    if owner.chars().any(char::is_control) {
+        return Err(Status::invalid_argument(
+            "owner must not contain control characters",
+        ));
+    }
+    Ok((!owner.is_empty()).then(|| owner.to_owned()))
+}
+
 fn parse_id(s: &str, field: &str) -> Result<Uuid, Status> {
     s.parse()
         .map_err(|_| Status::invalid_argument(format!("{field} is not a valid id")))
@@ -1045,7 +1094,10 @@ mod tests {
         for name in ["a", "b", "c"] {
             client
                 .create_environment(authed(
-                    CreateEnvironmentRequest { name: name.into() },
+                    CreateEnvironmentRequest {
+                        name: name.into(),
+                        owner: String::new(),
+                    },
                     &token,
                 ))
                 .await
@@ -1053,7 +1105,10 @@ mod tests {
         }
         let dup = client
             .create_environment(authed(
-                CreateEnvironmentRequest { name: "a".into() },
+                CreateEnvironmentRequest {
+                    name: "a".into(),
+                    owner: String::new(),
+                },
                 &token,
             ))
             .await
@@ -1150,6 +1205,136 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(missing.code(), tonic::Code::NotFound);
+    }
+
+    #[sqlx::test]
+    async fn environment_owner_is_created_updated_cleared_and_validated(pool: PgPool) {
+        let (mut client, _pool) = start(pool).await;
+        let token = login(&mut client, "admin", PASSWORD).await.unwrap();
+
+        let create = |name: &str, owner: &str| {
+            authed(
+                CreateEnvironmentRequest {
+                    name: name.into(),
+                    owner: owner.into(),
+                },
+                &token,
+            )
+        };
+        let update = |id: &str, owner: &str| {
+            authed(
+                UpdateEnvironmentRequest {
+                    id: id.into(),
+                    owner: owner.into(),
+                },
+                &token,
+            )
+        };
+
+        let acme = client
+            .create_environment(create("acme", "  Acme Corp  "))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(acme.owner, "Acme Corp");
+        let bare = client
+            .create_environment(create("bare", ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(bare.owner, "");
+
+        let owners = |client: &mut OperatorServiceClient<_>| {
+            let mut client = client.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .list_environments(authed(ListEnvironmentsRequest::default(), &token))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .environments
+                    .into_iter()
+                    .map(|e| (e.name, e.owner))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            owners(&mut client).await,
+            [
+                ("acme".into(), "Acme Corp".into()),
+                ("bare".into(), "".into())
+            ]
+        );
+
+        let set = client
+            .update_environment(update(&bare.id, "Beta"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!((set.owner.as_str(), set.name.as_str()), ("Beta", "bare"));
+        assert_eq!(owners(&mut client).await[1].1, "Beta");
+
+        for blank in ["", "   "] {
+            let cleared = client
+                .update_environment(update(&bare.id, blank))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(cleared.owner, "");
+        }
+        assert_eq!(owners(&mut client).await[1].1, "");
+
+        let long = "x".repeat(201);
+        let ok = "x".repeat(200);
+        let too_long = client
+            .create_environment(create("long", &long))
+            .await
+            .unwrap_err();
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        let too_long = client
+            .update_environment(update(&bare.id, &long))
+            .await
+            .unwrap_err();
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        client.create_environment(create("max", &ok)).await.unwrap();
+        client
+            .update_environment(update(&bare.id, &ok))
+            .await
+            .unwrap();
+
+        for bad in ["a\nb", "a\x1bb"] {
+            let e = client
+                .update_environment(update(&bare.id, bad))
+                .await
+                .unwrap_err();
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            let e = client
+                .create_environment(create("ctl", bad))
+                .await
+                .unwrap_err();
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+        }
+
+        let missing = client
+            .update_environment(update(&Uuid::now_v7().to_string(), "x"))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+        let malformed = client
+            .update_environment(update("nope", "x"))
+            .await
+            .unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+
+        let anon = client
+            .update_environment(UpdateEnvironmentRequest {
+                id: bare.id,
+                owner: "x".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(anon.code(), tonic::Code::Unauthenticated);
     }
 
     #[sqlx::test]
