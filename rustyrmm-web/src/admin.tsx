@@ -88,34 +88,36 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
       ) : environments.length === 0 ? (
         <p class="muted">No Environments yet. Create one to start pairing Endpoints.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Owner</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {environments.map((env) => (
-              <tr key={env.id} class={env.id === selected ? "selected" : ""}>
-                <td>
-                  <a
-                    href="#/environments"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setSelected(env.id);
-                    }}
-                  >
-                    {env.name}
-                  </a>
-                </td>
-                <td>{env.owner}</td>
-                <td>{when(env.createdAt)}</td>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Owner</th>
+                <th>Created</th>
               </tr>
-            ))}
-          </tbody>
+            </thead>
+            <tbody>
+              {environments.map((env) => (
+                <tr key={env.id} class={env.id === selected ? "selected" : ""}>
+                  <td>
+                    <a
+                      href="#/environments"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setSelected(env.id);
+                      }}
+                    >
+                      {env.name}
+                    </a>
+                  </td>
+                  <td>{env.owner}</td>
+                  <td>{when(env.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
         </table>
+        </div>
       )}
       {current && <OwnerForm key={current.id} environment={current} saved={load} failed={failed} />}
       {current && <PairingTokens key={current.id} environment={current} failed={failed} />}
@@ -130,19 +132,24 @@ function OwnerForm({ environment, saved, failed }: { environment: Environment; s
     api.updateEnvironment({ id: environment.id, owner }).then(saved).catch(failed);
   };
   return (
-    <form class="inline" onSubmit={save}>
-      <label>
-        Owner{" "}
-        <input
-          maxLength={200}
-          value={owner}
-          onInput={(e) => {
-            setOwner(e.currentTarget.value);
-          }}
-        />
-      </label>
-      <button type="submit">Save</button>
-    </form>
+    <section>
+      <div class="toolbar">
+        <h3>Owner for {environment.name}</h3>
+        <form class="inline" onSubmit={save}>
+          <label>
+            Owner{" "}
+            <input
+              maxLength={200}
+              value={owner}
+              onInput={(e) => {
+                setOwner(e.currentTarget.value);
+              }}
+            />
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+    </section>
   );
 }
 
