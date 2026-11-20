@@ -70,7 +70,7 @@ function App() {
       ) : hash === "#/environments" ? (
         <Environments isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : hash === "#/operators" ? (
-        <Operators onSessionEnded={endSession} />
+        <Operators isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : noAccess ? (
         <main>
           <p class="muted">You do not have access to any Environments. Ask an Administrator to add you.</p>
