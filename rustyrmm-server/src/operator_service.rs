@@ -15,9 +15,9 @@ use tonic::metadata::MetadataValue;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::auth::{self, authenticate, internal};
+use crate::auth::{self, authenticate, internal, Operator};
 use crate::commands::{self, DispatchError, NewCommand};
-use crate::operators::{self, AddOperatorError};
+use crate::operators::{self, AddOperatorError, SetAdminError};
 use crate::pairing;
 use crate::sessions::{LiveError, Sessions};
 
@@ -75,7 +75,7 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<AddOperatorRequest>,
     ) -> Result<Response<AddOperatorResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        require_admin(&authenticate(&self.pool, &req).await?)?;
         let AddOperatorRequest { username, password } = req.into_inner();
         let id = operators::add_operator(&self.pool, &username, &password)
             .await
@@ -95,7 +95,7 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<CreateEnvironmentRequest>,
     ) -> Result<Response<Environment>, Status> {
-        authenticate(&self.pool, &req).await?;
+        require_admin(&authenticate(&self.pool, &req).await?)?;
         let name = req.into_inner().name.trim().to_owned();
         if name.is_empty() {
             return Err(Status::invalid_argument(
@@ -127,15 +127,19 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<ListEnvironmentsRequest>,
     ) -> Result<Response<ListEnvironmentsResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let page = Page::new(req.page_size, &req.page_token)?;
         let rows: Vec<(Uuid, String, DateTime<Utc>)> = sqlx::query_as(
             "SELECT id, name, created_at FROM environments
-             WHERE $1::uuid IS NULL OR id > $1 ORDER BY id LIMIT $2",
+             WHERE ($1::uuid IS NULL OR id > $1)
+               AND ($3 OR id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
+             ORDER BY id LIMIT $2",
         )
         .bind(page.after)
         .bind(page.fetch())
+        .bind(operator.is_admin)
+        .bind(operator.id)
         .fetch_all(&self.pool)
         .await
         .map_err(internal)?;
@@ -157,9 +161,10 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<CreatePairingTokenRequest>,
     ) -> Result<Response<CreatePairingTokenResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let environment_id = parse_id(&req.environment_id, "environment_id")?;
+        self.require_environment(&operator, environment_id).await?;
         let ttl = match req.ttl {
             None => DEFAULT_PAIRING_TOKEN_TTL,
             Some(d) => chrono::Duration::new(d.seconds, d.nanos.max(0) as u32)
@@ -191,9 +196,10 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<ListPairingTokensRequest>,
     ) -> Result<Response<ListPairingTokensResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let environment_id = parse_id(&req.environment_id, "environment_id")?;
+        self.require_environment(&operator, environment_id).await?;
         let page = Page::new(req.page_size, &req.page_token)?;
         let rows: Vec<TokenRow> = sqlx::query_as(
             "SELECT id, environment_id, created_at, expires_at, revoked_at IS NOT NULL
@@ -217,8 +223,19 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<RevokePairingTokenRequest>,
     ) -> Result<Response<RevokePairingTokenResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().id, "id")?;
+        if !operator.is_admin {
+            let environment_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT environment_id FROM pairing_tokens WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(internal)?;
+            let environment_id =
+                environment_id.ok_or_else(|| Status::not_found("no such Pairing Token"))?;
+            self.require_environment(&operator, environment_id).await?;
+        }
         let found = sqlx::query(
             "UPDATE pairing_tokens SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1",
         )
@@ -237,22 +254,29 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<ListEndpointsRequest>,
     ) -> Result<Response<ListEndpointsResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let environment_id = req
             .environment_id
             .as_deref()
             .map(|id| parse_id(id, "environment_id"))
             .transpose()?;
+        if let Some(id) = environment_id {
+            self.require_environment(&operator, id).await?;
+        }
         let page = Page::new(req.page_size, &req.page_token)?;
         let rows: Vec<EndpointRow> = sqlx::query_as(&format!(
             "{ENDPOINT_SELECT}
              WHERE ($1::uuid IS NULL OR e.environment_id = $1) AND ($2::uuid IS NULL OR e.id > $2)
+               AND ($4 OR e.environment_id IN
+                    (SELECT environment_id FROM environment_members WHERE operator_id = $5))
              ORDER BY e.id LIMIT $3"
         ))
         .bind(environment_id)
         .bind(page.after)
         .bind(page.fetch())
+        .bind(operator.is_admin)
+        .bind(operator.id)
         .fetch_all(&self.pool)
         .await
         .map_err(internal)?;
@@ -267,8 +291,9 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<GetEndpointRequest>,
     ) -> Result<Response<Endpoint>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().id, "id")?;
+        self.require_endpoint(&operator, id).await?;
         let row: EndpointRow = sqlx::query_as(&format!("{ENDPOINT_SELECT} WHERE e.id = $1"))
             .bind(id)
             .fetch_optional(&self.pool)
@@ -282,8 +307,9 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<RevokeEndpointRequest>,
     ) -> Result<Response<RevokeEndpointResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().id, "id")?;
+        self.require_endpoint(&operator, id).await?;
         let found = sqlx::query(
             "UPDATE endpoints SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1",
         )
@@ -303,8 +329,9 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<DeleteEndpointRequest>,
     ) -> Result<Response<DeleteEndpointResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().id, "id")?;
+        self.require_endpoint(&operator, id).await?;
         // Samples, Inventory and certificates cascade; Commands are kept (no foreign key).
         let found = sqlx::query("DELETE FROM endpoints WHERE id = $1")
             .bind(id)
@@ -323,9 +350,10 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<ListSamplesRequest>,
     ) -> Result<Response<ListSamplesResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let endpoint_id = parse_id(&req.endpoint_id, "endpoint_id")?;
+        self.require_endpoint(&operator, endpoint_id).await?;
         let (Some(start), Some(end)) = (req.start.and_then(from_ts), req.end.and_then(from_ts))
         else {
             return Err(Status::invalid_argument("start and end are required"));
@@ -379,8 +407,9 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<GetProcessListRequest>,
     ) -> Result<Response<GetProcessListResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().endpoint_id, "endpoint_id")?;
+        self.require_endpoint(&operator, id).await?;
         match self
             .sessions
             .request_process_list(id, PROCESS_LIST_WAIT)
@@ -401,6 +430,7 @@ impl OperatorService for OperatorApi {
         let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let endpoint_id = parse_id(&req.endpoint_id, "endpoint_id")?;
+        self.require_endpoint(&operator, endpoint_id).await?;
         let interpreter = Interpreter::try_from(req.interpreter)
             .ok()
             .filter(|i| *i != Interpreter::Unspecified)
@@ -435,7 +465,7 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<GetCommandRequest>,
     ) -> Result<Response<CommandRecord>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let id = parse_id(&req.into_inner().id, "id")?;
         let row: CommandRow = sqlx::query_as(&format!("{COMMAND_SELECT} WHERE id = $1"))
             .bind(id)
@@ -443,6 +473,13 @@ impl OperatorService for OperatorApi {
             .await
             .map_err(internal)?
             .ok_or_else(|| Status::not_found("no such Command"))?;
+        // A deleted Endpoint's Environment is unknown, so only Admins may read its Commands.
+        self.require_endpoint(&operator, row.endpoint_id)
+            .await
+            .map_err(|e| match e.code() {
+                tonic::Code::NotFound => Status::permission_denied("that Endpoint was deleted"),
+                _ => e,
+            })?;
         Ok(Response::new(command_from_row(row)))
     }
 
@@ -450,23 +487,32 @@ impl OperatorService for OperatorApi {
         &self,
         req: Request<ListCommandsRequest>,
     ) -> Result<Response<ListCommandsResponse>, Status> {
-        authenticate(&self.pool, &req).await?;
+        let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let endpoint_id = req
             .endpoint_id
             .as_deref()
             .map(|id| parse_id(id, "endpoint_id"))
             .transpose()?;
+        if let Some(id) = endpoint_id {
+            self.require_endpoint(&operator, id).await?;
+        }
         let page = Page::new(req.page_size, &req.page_token)?;
         // Newest first: page backwards through the time-ordered ids.
         let rows: Vec<CommandRow> = sqlx::query_as(&format!(
             "{COMMAND_SELECT}
              WHERE ($1::uuid IS NULL OR endpoint_id = $1) AND ($2::uuid IS NULL OR id < $2)
+               AND ($4 OR endpoint_id IN
+                    (SELECT e.id FROM endpoints e
+                     JOIN environment_members m ON m.environment_id = e.environment_id
+                     WHERE m.operator_id = $5))
              ORDER BY id DESC LIMIT $3"
         ))
         .bind(endpoint_id)
         .bind(page.after)
         .bind(page.fetch())
+        .bind(operator.is_admin)
+        .bind(operator.id)
         .fetch_all(&self.pool)
         .await
         .map_err(internal)?;
@@ -475,6 +521,108 @@ impl OperatorService for OperatorApi {
             commands: rows.into_iter().map(command_from_row).collect(),
             next_page_token,
         }))
+    }
+
+    async fn who_am_i(
+        &self,
+        req: Request<WhoAmIRequest>,
+    ) -> Result<Response<WhoAmIResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        Ok(Response::new(WhoAmIResponse {
+            username: operator.username,
+            is_admin: operator.is_admin,
+        }))
+    }
+
+    async fn list_operators(
+        &self,
+        req: Request<ListOperatorsRequest>,
+    ) -> Result<Response<ListOperatorsResponse>, Status> {
+        require_admin(&authenticate(&self.pool, &req).await?)?;
+        // Not paged: there are few Operators.
+        let rows: Vec<(String, bool, Vec<Uuid>)> = sqlx::query_as(
+            "SELECT o.username, o.is_admin,
+                    coalesce(array_agg(m.environment_id ORDER BY m.environment_id)
+                             FILTER (WHERE m.environment_id IS NOT NULL), '{}')
+             FROM operators o LEFT JOIN environment_members m ON m.operator_id = o.id
+             GROUP BY o.id ORDER BY o.username",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(ListOperatorsResponse {
+            operators: rows
+                .into_iter()
+                .map(|(username, is_admin, ids)| OperatorInfo {
+                    username,
+                    is_admin,
+                    environment_ids: ids.iter().map(Uuid::to_string).collect(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn set_admin(
+        &self,
+        req: Request<SetAdminRequest>,
+    ) -> Result<Response<SetAdminResponse>, Status> {
+        require_admin(&authenticate(&self.pool, &req).await?)?;
+        let SetAdminRequest { username, is_admin } = req.into_inner();
+        operators::set_admin(&self.pool, &username, is_admin)
+            .await
+            .map_err(|e| match e {
+                SetAdminError::NoSuchOperator(_) => Status::not_found(e.to_string()),
+                SetAdminError::LastAdmin => Status::failed_precondition(e.to_string()),
+                e => internal(e),
+            })?;
+        Ok(Response::new(SetAdminResponse {}))
+    }
+
+    async fn add_environment_member(
+        &self,
+        req: Request<EnvironmentMemberRequest>,
+    ) -> Result<Response<EnvironmentMemberResponse>, Status> {
+        require_admin(&authenticate(&self.pool, &req).await?)?;
+        let req = req.into_inner();
+        let environment_id = parse_id(&req.environment_id, "environment_id")?;
+        let operator_id = self.member_ids(environment_id, &req.username).await?;
+        sqlx::query(
+            "INSERT INTO environment_members (environment_id, operator_id) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(environment_id)
+        .bind(operator_id)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(EnvironmentMemberResponse {}))
+    }
+
+    async fn remove_environment_member(
+        &self,
+        req: Request<EnvironmentMemberRequest>,
+    ) -> Result<Response<EnvironmentMemberResponse>, Status> {
+        require_admin(&authenticate(&self.pool, &req).await?)?;
+        let req = req.into_inner();
+        let environment_id = parse_id(&req.environment_id, "environment_id")?;
+        let operator_id = self.member_ids(environment_id, &req.username).await?;
+        sqlx::query(
+            "DELETE FROM environment_members WHERE environment_id = $1 AND operator_id = $2",
+        )
+        .bind(environment_id)
+        .bind(operator_id)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(EnvironmentMemberResponse {}))
+    }
+}
+
+fn require_admin(operator: &Operator) -> Result<(), Status> {
+    if operator.is_admin {
+        Ok(())
+    } else {
+        Err(Status::permission_denied("only Admins may do this"))
     }
 }
 
@@ -613,6 +761,67 @@ fn from_ts(t: prost_types::Timestamp) -> Option<DateTime<Utc>> {
 type TokenRow = (Uuid, Uuid, DateTime<Utc>, DateTime<Utc>, bool);
 
 impl OperatorApi {
+    /// Admins reach every Environment; other Operators only those they belong to. Admins skip
+    /// the lookup, so callers still report a missing id themselves.
+    async fn require_environment(&self, operator: &Operator, id: Uuid) -> Result<(), Status> {
+        if operator.is_admin {
+            return Ok(());
+        }
+        let (exists, member): (bool, bool) = sqlx::query_as(
+            "SELECT EXISTS (SELECT 1 FROM environments WHERE id = $1),
+                    EXISTS (SELECT 1 FROM environment_members WHERE environment_id = $1 AND operator_id = $2)",
+        )
+        .bind(id)
+        .bind(operator.id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(internal)?;
+        match (exists, member) {
+            (_, true) => Ok(()),
+            (true, false) => Err(Status::permission_denied(
+                "not a member of that Environment",
+            )),
+            (false, _) => Err(Status::not_found("no such Environment")),
+        }
+    }
+
+    /// Access to an Endpoint is access to its Environment. A deleted Endpoint (whose Commands
+    /// remain) has none, so only Admins pass.
+    async fn require_endpoint(&self, operator: &Operator, id: Uuid) -> Result<(), Status> {
+        if operator.is_admin {
+            return Ok(());
+        }
+        let environment_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(internal)?;
+        match environment_id {
+            Some(env) => self.require_environment(operator, env).await,
+            None => Err(no_endpoint()),
+        }
+    }
+
+    /// The Operator's id, once the Environment is known to exist.
+    async fn member_ids(&self, environment_id: Uuid, username: &str) -> Result<Uuid, Status> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM environments WHERE id = $1)")
+                .bind(environment_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(internal)?;
+        if !exists {
+            return Err(Status::not_found("no such Environment"));
+        }
+        sqlx::query_scalar("SELECT id FROM operators WHERE username = $1")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| Status::not_found(format!("no Operator named {username:?}")))
+    }
+
     fn endpoint(
         &self,
         (id, environment_id, hostname, paired_at, last_seen_at, revoked, inventory): EndpointRow,
@@ -1448,5 +1657,415 @@ mod tests {
         agent.await.unwrap();
         assert_eq!(list.processes[0].name, "init");
         assert!(list.received_at.is_some());
+    }
+
+    fn code<T>(r: Result<Response<T>, Status>) -> tonic::Code {
+        r.map(drop).unwrap_err().code()
+    }
+
+    async fn add_user(client: &mut OperatorServiceClient<Channel>, admin: &str, name: &str) {
+        client
+            .add_operator(authed(
+                AddOperatorRequest {
+                    username: name.into(),
+                    password: PASSWORD.into(),
+                },
+                admin,
+            ))
+            .await
+            .unwrap();
+    }
+
+    /// Calls every Environment-scoped RPC as `token` against `env`, on a fresh Endpoint of it;
+    /// returns each RPC's name and whether it was refused with permission_denied.
+    async fn denied_by_rpc(
+        client: &mut OperatorServiceClient<Channel>,
+        pool: &PgPool,
+        token: &str,
+        env: Uuid,
+    ) -> Vec<(&'static str, bool)> {
+        let ep = Uuid::now_v7();
+        let (cmd, pt) = (Uuid::now_v7(), Uuid::now_v7());
+        sqlx::query("INSERT INTO endpoints (id, environment_id, hostname) VALUES ($1, $2, 'h')")
+            .bind(ep)
+            .bind(env)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO commands (id, endpoint_id, endpoint_hostname, operator_username,
+                                   interpreter, script, timeout_seconds, status)
+             VALUES ($1, $2, 'h', 'x', 1, 'true', 1, 0)",
+        )
+        .bind(cmd)
+        .bind(ep)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO pairing_tokens (id, environment_id, secret_hash, expires_at)
+             VALUES ($1, $2, $3, now() + interval '1 day')",
+        )
+        .bind(pt)
+        .bind(env)
+        .bind(pt.as_bytes().to_vec())
+        .execute(pool)
+        .await
+        .unwrap();
+        let (env, ep, cmd, pt) = (
+            env.to_string(),
+            ep.to_string(),
+            cmd.to_string(),
+            pt.to_string(),
+        );
+        let denied = |r: Result<(), Status>| {
+            r.err()
+                .is_some_and(|e| e.code() == tonic::Code::PermissionDenied)
+        };
+        let now = chrono::Utc::now();
+        let range = (Some(ts(now - chrono::Duration::hours(1))), Some(ts(now)));
+        vec![
+            (
+                "create_pairing_token",
+                denied(
+                    client
+                        .create_pairing_token(authed(
+                            CreatePairingTokenRequest {
+                                environment_id: env.clone(),
+                                ttl: None,
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "list_pairing_tokens",
+                denied(
+                    client
+                        .list_pairing_tokens(authed(
+                            ListPairingTokensRequest {
+                                environment_id: env.clone(),
+                                page_size: 0,
+                                page_token: String::new(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "revoke_pairing_token",
+                denied(
+                    client
+                        .revoke_pairing_token(authed(RevokePairingTokenRequest { id: pt }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "list_endpoints",
+                denied(
+                    client
+                        .list_endpoints(authed(
+                            ListEndpointsRequest {
+                                environment_id: Some(env),
+                                page_size: 0,
+                                page_token: String::new(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "get_endpoint",
+                denied(
+                    client
+                        .get_endpoint(authed(GetEndpointRequest { id: ep.clone() }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "list_samples",
+                denied(
+                    client
+                        .list_samples(authed(
+                            ListSamplesRequest {
+                                endpoint_id: ep.clone(),
+                                start: range.0,
+                                end: range.1,
+                                page_size: 0,
+                                page_token: String::new(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "get_process_list",
+                denied(
+                    client
+                        .get_process_list(authed(
+                            GetProcessListRequest {
+                                endpoint_id: ep.clone(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "run_command",
+                denied(
+                    client
+                        .run_command(authed(
+                            RunCommandRequest {
+                                endpoint_id: ep.clone(),
+                                interpreter: Interpreter::Sh as i32,
+                                script: "true".into(),
+                                timeout_seconds: 0,
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "get_command",
+                denied(
+                    client
+                        .get_command(authed(GetCommandRequest { id: cmd }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "list_commands",
+                denied(
+                    client
+                        .list_commands(authed(
+                            ListCommandsRequest {
+                                endpoint_id: Some(ep.clone()),
+                                page_size: 0,
+                                page_token: String::new(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "revoke_endpoint",
+                denied(
+                    client
+                        .revoke_endpoint(authed(RevokeEndpointRequest { id: ep.clone() }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "delete_endpoint",
+                denied(
+                    client
+                        .delete_endpoint(authed(DeleteEndpointRequest { id: ep }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+        ]
+    }
+
+    #[sqlx::test]
+    async fn environments_are_an_access_boundary(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        add_user(&mut client, &admin, "bob").await;
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let (env, other) = (Uuid::now_v7(), Uuid::now_v7());
+        for (id, name) in [(env, "lab"), (other, "other")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(id)
+                .bind(name)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let who = |c: &mut OperatorServiceClient<Channel>, t: String| {
+            let mut c = c.clone();
+            async move {
+                c.who_am_i(authed(WhoAmIRequest {}, &t))
+                    .await
+                    .unwrap()
+                    .into_inner()
+            }
+        };
+        assert!(who(&mut client, admin.clone()).await.is_admin);
+        assert!(!who(&mut client, bob.clone()).await.is_admin);
+
+        // Only Admins create Operators and Environments.
+        assert_eq!(
+            code(
+                client
+                    .add_operator(authed(
+                        AddOperatorRequest {
+                            username: "eve".into(),
+                            password: PASSWORD.into()
+                        },
+                        &bob
+                    ))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            code(
+                client
+                    .create_environment(authed(CreateEnvironmentRequest { name: "x".into() }, &bob))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+
+        // Not a member: everything is denied. Admin: nothing is, without any membership.
+        let denied = denied_by_rpc(&mut client, &pool, &bob, env).await;
+        assert!(denied.iter().all(|(_, d)| *d), "{denied:?}");
+        let denied = denied_by_rpc(&mut client, &pool, &admin, env).await;
+        assert!(denied.iter().all(|(_, d)| !*d), "{denied:?}");
+
+        let member = |e: Uuid| EnvironmentMemberRequest {
+            environment_id: e.to_string(),
+            username: "bob".into(),
+        };
+        for _ in 0..2 {
+            client
+                .add_environment_member(authed(member(env), &admin))
+                .await
+                .unwrap();
+        }
+        let denied = denied_by_rpc(&mut client, &pool, &bob, env).await;
+        assert!(denied.iter().all(|(_, d)| !*d), "{denied:?}");
+        // Another Environment stays closed, and lists show only what bob can reach.
+        let denied = denied_by_rpc(&mut client, &pool, &bob, other).await;
+        assert!(denied.iter().all(|(_, d)| *d), "{denied:?}");
+        let envs = client
+            .list_environments(authed(
+                ListEnvironmentsRequest {
+                    page_size: 0,
+                    page_token: String::new(),
+                },
+                &bob,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .environments;
+        assert_eq!(
+            envs.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            [env.to_string()]
+        );
+        let list = |t: &str| {
+            authed(
+                ListEndpointsRequest {
+                    environment_id: None,
+                    page_size: 0,
+                    page_token: String::new(),
+                },
+                t,
+            )
+        };
+        let mine = client
+            .list_endpoints(list(&bob))
+            .await
+            .unwrap()
+            .into_inner()
+            .endpoints;
+        let all = client
+            .list_endpoints(list(&admin))
+            .await
+            .unwrap()
+            .into_inner()
+            .endpoints;
+        assert!(!mine.is_empty() && mine.len() < all.len());
+        assert!(mine.iter().all(|e| e.environment_id == env.to_string()));
+        let cmds = |t: &str| {
+            authed(
+                ListCommandsRequest {
+                    endpoint_id: None,
+                    page_size: 0,
+                    page_token: String::new(),
+                },
+                t,
+            )
+        };
+        let mine = client
+            .list_commands(cmds(&bob))
+            .await
+            .unwrap()
+            .into_inner()
+            .commands;
+        let all = client
+            .list_commands(cmds(&admin))
+            .await
+            .unwrap()
+            .into_inner()
+            .commands;
+        assert!(!mine.is_empty() && mine.len() < all.len());
+
+        for _ in 0..2 {
+            client
+                .remove_environment_member(authed(member(env), &admin))
+                .await
+                .unwrap();
+        }
+        let denied = denied_by_rpc(&mut client, &pool, &bob, env).await;
+        assert!(denied.iter().all(|(_, d)| *d), "{denied:?}");
+
+        // Members can't manage membership; the sole Admin can't remove themselves.
+        assert_eq!(
+            code(
+                client
+                    .add_environment_member(authed(member(env), &bob))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+        let set = |name: &str, is_admin: bool| SetAdminRequest {
+            username: name.into(),
+            is_admin,
+        };
+        assert_eq!(
+            code(client.set_admin(authed(set("admin", false), &admin)).await),
+            tonic::Code::FailedPrecondition
+        );
+        client
+            .set_admin(authed(set("bob", true), &admin))
+            .await
+            .unwrap();
+        client
+            .set_admin(authed(set("admin", false), &admin))
+            .await
+            .unwrap();
+        let ops = client
+            .list_operators(authed(ListOperatorsRequest {}, &bob))
+            .await
+            .unwrap()
+            .into_inner()
+            .operators;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.username.as_str(), o.is_admin))
+                .collect::<Vec<_>>(),
+            [("admin", false), ("bob", true)]
+        );
     }
 }

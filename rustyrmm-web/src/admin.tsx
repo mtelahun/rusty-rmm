@@ -20,7 +20,7 @@ function failHandler(onSessionEnded: () => void, setError: (m: string) => void) 
   };
 }
 
-export function Environments({ onSessionEnded }: { onSessionEnded: () => void }) {
+export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSessionEnded: () => void }) {
   const [environments, setEnvironments] = useState<Environment[] | undefined>(undefined);
   const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
@@ -58,18 +58,20 @@ export function Environments({ onSessionEnded }: { onSessionEnded: () => void })
     <main>
       <div class="toolbar">
         <h2>Environments</h2>
-        <form class="inline" onSubmit={create}>
-          <input
-            aria-label="New Environment name"
-            placeholder="New Environment name"
-            value={name}
-            onInput={(e) => {
-              setName(e.currentTarget.value);
-            }}
-            required
-          />
-          <button type="submit">Create</button>
-        </form>
+        {isAdmin && (
+          <form class="inline" onSubmit={create}>
+            <input
+              aria-label="New Environment name"
+              placeholder="New Environment name"
+              value={name}
+              onInput={(e) => {
+                setName(e.currentTarget.value);
+              }}
+              required
+            />
+            <button type="submit">Create</button>
+          </form>
+        )}
       </div>
       {error && <p class="error" role="alert">{error}</p>}
       {environments === undefined ? (
@@ -266,7 +268,7 @@ function InstallCommands({ created, onDismiss }: { created: CreatePairingTokenRe
   );
 }
 
-export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
+export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSessionEnded: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [shown, setShown] = useState(false); // Instead of a confirm field: the Operator can check for typos.
@@ -297,47 +299,51 @@ export function Operators({ onSessionEnded }: { onSessionEnded: () => void }) {
   return (
     <main>
       <h2>Add an Operator</h2>
-      <form class="stack" onSubmit={submit}>
-        <label>
-          Username
-          <input
-            autocomplete="off"
-            value={username}
-            onInput={(e) => {
-              setUsername(e.currentTarget.value);
-            }}
-            required
-          />
-        </label>
-        <label>
-          Password (at least 12 characters)
-          <input
-            {...(shown ? { type: "text" as const } : { type: "password" as const })}
-            autocomplete="new-password"
-            minLength={12}
-            value={password}
-            onInput={(e) => {
-              setPassword(e.currentTarget.value);
-            }}
-            required
-          />
-        </label>
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={shown}
-            onChange={(e) => {
-              setShown(e.currentTarget.checked);
-            }}
-          />
-          Show password
-        </label>
-        {error && <p class="error" role="alert">{error}</p>}
-        {added && <p role="status">Added Operator {added}.</p>}
-        <button type="submit" disabled={busy}>
-          {busy ? "Adding…" : "Add Operator"}
-        </button>
-      </form>
+      {isAdmin ? (
+        <form class="stack" onSubmit={submit}>
+          <label>
+            Username
+            <input
+              autocomplete="off"
+              value={username}
+              onInput={(e) => {
+                setUsername(e.currentTarget.value);
+              }}
+              required
+            />
+          </label>
+          <label>
+            Password (at least 12 characters)
+            <input
+              {...(shown ? { type: "text" as const } : { type: "password" as const })}
+              autocomplete="new-password"
+              minLength={12}
+              value={password}
+              onInput={(e) => {
+                setPassword(e.currentTarget.value);
+              }}
+              required
+            />
+          </label>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={shown}
+              onChange={(e) => {
+                setShown(e.currentTarget.checked);
+              }}
+            />
+            Show password
+          </label>
+          {error && <p class="error" role="alert">{error}</p>}
+          {added && <p role="status">Added Operator {added}.</p>}
+          <button type="submit" disabled={busy}>
+            {busy ? "Adding…" : "Add Operator"}
+          </button>
+        </form>
+      ) : (
+        <p class="muted">Only Administrators can add Operators.</p>
+      )}
     </main>
   );
 }
