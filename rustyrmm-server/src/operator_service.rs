@@ -2071,6 +2071,62 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn environment_owner_follows_membership(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        add_user(&mut client, &admin, "bob").await;
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let env = Uuid::now_v7();
+        sqlx::query("INSERT INTO environments (id, name, owner) VALUES ($1, 'lab', 'Acme')")
+            .bind(env)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let update = |token: &str| {
+            authed(
+                UpdateEnvironmentRequest {
+                    id: env.to_string(),
+                    owner: "Beta".into(),
+                },
+                token,
+            )
+        };
+
+        // A non-member neither sees nor sets the owner.
+        let envs = client
+            .list_environments(authed(ListEnvironmentsRequest::default(), &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(envs.environments.is_empty());
+        let e = client.update_environment(update(&bob)).await.unwrap_err();
+        assert_eq!(e.code(), tonic::Code::PermissionDenied);
+
+        client
+            .add_environment_member(authed(
+                EnvironmentMemberRequest {
+                    environment_id: env.to_string(),
+                    username: "bob".into(),
+                },
+                &admin,
+            ))
+            .await
+            .unwrap();
+        let set = client
+            .update_environment(update(&bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(set.owner, "Beta");
+        let envs = client
+            .list_environments(authed(ListEnvironmentsRequest::default(), &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(envs.environments[0].owner, "Beta");
+    }
+
+    #[sqlx::test]
     async fn environments_are_an_access_boundary(pool: PgPool) {
         let (mut client, pool) = start(pool).await;
         let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
@@ -2115,7 +2171,13 @@ mod tests {
         assert_eq!(
             code(
                 client
-                    .create_environment(authed(CreateEnvironmentRequest { name: "x".into() }, &bob))
+                    .create_environment(authed(
+                        CreateEnvironmentRequest {
+                            name: "x".into(),
+                            owner: String::new()
+                        },
+                        &bob
+                    ))
                     .await
             ),
             tonic::Code::PermissionDenied
