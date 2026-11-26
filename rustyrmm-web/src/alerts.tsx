@@ -58,8 +58,7 @@ export function AlertBell({ count }: { count: number }) {
   return (
     <div class="bell" ref={box}>
       <button
-        class={count > 0 ? "bell-button active" : "bell-button muted"}
-        aria-label="Alerts"
+        aria-label={count > 0 ? `Alerts, ${count} unhandled` : "Alerts"}
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
@@ -92,7 +91,8 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
   const [includeSnoozed, setIncludeSnoozed] = useState(false);
   const [includeResolved, setIncludeResolved] = useState(false);
   const [alerts, setAlerts] = useState<Alert[] | undefined>(undefined);
-  const [selectedId, setSelectedId] = useState("");
+  // The last copy of the chosen Alert, so its panel survives leaving the filtered list.
+  const [selected, setSelected] = useState<Alert | undefined>(undefined);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
 
@@ -133,7 +133,8 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
 
   const act = (call: Promise<Alert>) => {
     call
-      .then(() => {
+      .then((a) => {
+        setSelected(a);
         setNote("");
         load();
         onChanged();
@@ -141,7 +142,6 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
       .catch(failed);
   };
 
-  const selected = alerts?.find((a) => a.id === selectedId);
   const status = (a: Alert) =>
     a.resolvedAt
       ? `Resolved at ${when(a.resolvedAt)}`
@@ -210,8 +210,12 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
           </thead>
           <tbody>
             {alerts.map((a) => (
-              <tr key={a.id} class="clickable" onClick={() => setSelectedId(a.id)} aria-selected={a.id === selectedId}>
-                <td>{when(a.openedAt)}</td>
+              <tr key={a.id} class={a.id === selected?.id ? "selected" : ""}>
+                <td>
+                  <button onClick={() => setSelected(a)}>
+                    {when(a.openedAt)}
+                  </button>
+                </td>
                 <td>{a.environmentName}</td>
                 <td>{a.agentVersion}</td>
                 <td>Offline</td>

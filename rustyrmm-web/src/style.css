@@ -289,18 +289,13 @@ tr.selected {
   position: relative;
 }
 
-.bell-button.muted {
-  opacity: 0.5;
-}
-
-.bell-button.active {
-  border-color: var(--bad);
-  font-weight: 600;
-}
-
 .bell-count {
-  margin-left: 0.25rem;
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--bg);
   color: var(--bad);
+  font-weight: 600;
 }
 
 .bell-menu {
@@ -318,14 +313,6 @@ tr.selected {
 
 .bell-menu li {
   padding: 0.25rem 0;
-}
-
-tr.clickable {
-  cursor: pointer;
-}
-
-tr[aria-selected="true"] {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .alert-detail {
