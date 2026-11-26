@@ -5,6 +5,7 @@ import { all, api, message, needsLogin, when } from "./api";
 import { Environments, Operators } from "./admin";
 import { AlertBell, AlertsOverview } from "./alerts";
 import { EndpointDetail } from "./detail";
+import { Notifications } from "./notifications";
 import "./style.css";
 
 function App() {
@@ -15,6 +16,7 @@ function App() {
   const [noAccess, setNoAccess] = useState(false);
   const [hash, setHash] = useState(location.hash);
   const [alertCount, setAlertCount] = useState(0);
+  const [notificationCount, setNotificationCount] = useState("0");
 
   useEffect(() => {
     const onHash = () => {
@@ -47,10 +49,25 @@ function App() {
         if (needsLogin(e)) setLoggedIn(false);
       });
   };
+  const refreshNotificationCount = () => {
+    api
+      .listNotifications({ pageSize: 100 })
+      .then((r) => {
+        const unread = r.notifications.filter((n) => !n.readAt).length;
+        setNotificationCount(r.notifications.length === 100 && r.nextPageToken ? "99+" : String(unread));
+      })
+      .catch((e) => {
+        if (needsLogin(e)) setLoggedIn(false);
+      });
+  };
   useEffect(() => {
     if (!loggedIn) return;
     refreshAlertCount();
-    const timer = setInterval(refreshAlertCount, 60_000);
+    refreshNotificationCount();
+    const timer = setInterval(() => {
+      refreshAlertCount();
+      refreshNotificationCount();
+    }, 60_000);
     return () => {
       clearInterval(timer);
     };
@@ -77,7 +94,7 @@ function App() {
           {nav("#/operators", "Operators", hash === "#/operators")}
         </nav>
         <div class="header-actions">
-          <AlertBell count={alertCount} />
+          <AlertBell count={alertCount} notificationCount={notificationCount} />
           <button
             onClick={() => {
               void api.logout({}).catch(() => {}).finally(() => setLoggedIn(false));
@@ -93,6 +110,8 @@ function App() {
         <Environments isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : hash === "#/alerts" ? (
         <AlertsOverview onSessionEnded={endSession} onChanged={refreshAlertCount} />
+      ) : hash === "#/notifications" ? (
+        <Notifications onSessionEnded={endSession} onChanged={refreshNotificationCount} />
       ) : hash === "#/operators" ? (
         <Operators isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : noAccess ? (

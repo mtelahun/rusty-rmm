@@ -35,7 +35,7 @@ function openedAfter(time: string): Date | undefined {
 }
 
 /** The header bell: the unhandled Alert count and a menu that leads to the Alerts Overview. */
-export function AlertBell({ count }: { count: number }) {
+export function AlertBell({ count, notificationCount }: { count: number; notificationCount: string }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
 
@@ -75,6 +75,16 @@ export function AlertBell({ count }: { count: number }) {
               }}
             >
               View All Alerts ({count})
+            </a>
+          </li>
+          <li>
+            <a
+              href="#/notifications"
+              onClick={() => {
+                setOpen(false);
+              }}
+            >
+              Notifications ({notificationCount})
             </a>
           </li>
         </ul>

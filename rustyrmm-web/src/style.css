@@ -351,3 +351,7 @@ tr.selected {
 .alert-detail .actions input {
   flex: 1;
 }
+
+tr.unread {
+  font-weight: bold;
+}
