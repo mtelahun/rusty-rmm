@@ -20,5 +20,8 @@
     "@preact/preset-vite": "^2.10.6",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
+  },
+  "allowScripts": {
+    "@bufbuild/buf@1.75.0": true
   }
 }
