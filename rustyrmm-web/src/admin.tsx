@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
-import type { CreatePairingTokenResponse, Environment, PairingToken } from "./gen/rustyrmm/operator/v1/operator_pb";
+import type { CreatePairingTokenResponse, Environment, OperatorInfo, PairingToken } from "./gen/rustyrmm/operator/v1/operator_pb";
 import { all, api, message, needsLogin, when } from "./api";
 
 // Same one-liners as `rustyrmm pairing-token create` (rustyrmm-cli/src/main.rs).
@@ -24,6 +24,7 @@ export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; on
   const [environments, setEnvironments] = useState<Environment[] | undefined>(undefined);
   const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
+  const [owner, setOwner] = useState("");
   const [error, setError] = useState("");
   const failed = failHandler(onSessionEnded, setError);
 
@@ -43,9 +44,10 @@ export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; on
   const create = (e: Event) => {
     e.preventDefault();
     api
-      .createEnvironment({ name })
+      .createEnvironment({ name, owner })
       .then((env) => {
         setName("");
+        setOwner("");
         setSelected(env.id);
         load();
       })
@@ -69,6 +71,15 @@ export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; on
               }}
               required
             />
+            <input
+              aria-label="Owner (optional)"
+              placeholder="Owner (optional)"
+              maxLength={200}
+              value={owner}
+              onInput={(e) => {
+                setOwner(e.currentTarget.value);
+              }}
+            />
             <button type="submit">Create</button>
           </form>
         )}
@@ -79,35 +90,68 @@ export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; on
       ) : environments.length === 0 ? (
         <p class="muted">No Environments yet. Create one to start pairing Endpoints.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {environments.map((env) => (
-              <tr key={env.id} class={env.id === selected ? "selected" : ""}>
-                <td>
-                  <a
-                    href="#/environments"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setSelected(env.id);
-                    }}
-                  >
-                    {env.name}
-                  </a>
-                </td>
-                <td>{when(env.createdAt)}</td>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Owner</th>
+                <th>Created</th>
               </tr>
-            ))}
-          </tbody>
+            </thead>
+            <tbody>
+              {environments.map((env) => (
+                <tr key={env.id} class={env.id === selected ? "selected" : ""}>
+                  <td>
+                    <a
+                      href="#/environments"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setSelected(env.id);
+                      }}
+                    >
+                      {env.name}
+                    </a>
+                  </td>
+                  <td>{env.owner}</td>
+                  <td>{when(env.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
         </table>
+        </div>
       )}
+      {current && <OwnerForm key={current.id} environment={current} saved={load} failed={failed} />}
       {current && <PairingTokens key={current.id} environment={current} failed={failed} />}
     </main>
+  );
+}
+
+function OwnerForm({ environment, saved, failed }: { environment: Environment; saved: () => void; failed: (e: unknown) => void }) {
+  const [owner, setOwner] = useState(environment.owner);
+  const save = (e: Event) => {
+    e.preventDefault();
+    api.updateEnvironment({ id: environment.id, owner }).then(saved).catch(failed);
+  };
+  return (
+    <section>
+      <div class="toolbar">
+        <h3>Owner for {environment.name}</h3>
+        <form class="inline" onSubmit={save}>
+          <label>
+            Owner{" "}
+            <input
+              maxLength={200}
+              value={owner}
+              onInput={(e) => {
+                setOwner(e.currentTarget.value);
+              }}
+            />
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+    </section>
   );
 }
 
@@ -268,14 +312,107 @@ function InstallCommands({ created, onDismiss }: { created: CreatePairingTokenRe
   );
 }
 
+/** An email address with an Edit button; saving calls onSaved so the parent can reload. */
+function EmailEditor({ username, email, onSaved, onSessionEnded }: { username: string; email: string; onSaved: () => void; onSessionEnded: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(email);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const failed = failHandler(onSessionEnded, setError);
+
+  const save = (e: Event) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    api
+      .setOperatorEmail({ username, email: value })
+      .then(() => {
+        setEditing(false);
+        onSaved();
+      })
+      .catch(failed)
+      .finally(() => {
+        setBusy(false);
+      });
+  };
+
+  if (!editing) {
+    return (
+      <>
+        {email}{" "}
+        <button
+          aria-label={`Edit email address of ${username}`}
+          onClick={() => {
+            setValue(email);
+            setEditing(true);
+          }}
+        >
+          Edit
+        </button>
+      </>
+    );
+  }
+  return (
+    <form class="inline" onSubmit={save}>
+      <input
+        type="email"
+        aria-label={`Email address of ${username}`}
+        value={value}
+        onInput={(e) => {
+          setValue(e.currentTarget.value);
+        }}
+        required
+      />{" "}
+      <button type="submit" disabled={busy}>
+        {busy ? "Saving…" : "Save"}
+      </button>{" "}
+      <button
+        type="button"
+        onClick={() => {
+          setEditing(false);
+          setError("");
+        }}
+      >
+        Cancel
+      </button>
+      {error && (
+        <p class="error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
 export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSessionEnded: () => void }) {
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [shown, setShown] = useState(false); // Instead of a confirm field: the Operator can check for typos.
   const [error, setError] = useState("");
   const [added, setAdded] = useState("");
   const [busy, setBusy] = useState(false);
+  const [operators, setOperators] = useState<OperatorInfo[] | undefined>(undefined);
+  const [me, setMe] = useState<{ username: string; email: string } | undefined>(undefined);
   const failed = failHandler(onSessionEnded, setError);
+
+  const load = () => {
+    api
+      .whoAmI({})
+      .then((r) => {
+        setMe({ username: r.username, email: r.email ?? "" });
+      })
+      .catch(failed);
+    if (isAdmin) {
+      api
+        .listOperators({})
+        .then((r) => {
+          setOperators(r.operators);
+        })
+        .catch(failed);
+    }
+  };
+  useEffect(load, [isAdmin]);
 
   const submit = (e: Event) => {
     e.preventDefault();
@@ -283,12 +420,14 @@ export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSes
     setBusy(true);
     setError("");
     api
-      .addOperator({ username, password })
+      .addOperator({ username, password, email })
       .then(() => {
         setAdded(username);
         setUsername("");
+        setEmail("");
         setPassword("");
         setShown(false);
+        load();
       })
       .catch(failed)
       .finally(() => {
@@ -298,6 +437,37 @@ export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSes
 
   return (
     <main>
+      <h2>Your email address</h2>
+      {me && <EmailEditor key={me.email} username={me.username} email={me.email} onSaved={load} onSessionEnded={onSessionEnded} />}
+      {isAdmin && (
+        <>
+          <h2>Operators</h2>
+          {operators && (
+            <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Email</th>
+                  <th>Admin</th>
+                </tr>
+              </thead>
+              <tbody>
+                {operators.map((o) => (
+                  <tr key={o.username}>
+                    <td>{o.username}</td>
+                    <td>
+                      <EmailEditor key={o.email ?? ""} username={o.username} email={o.email ?? ""} onSaved={load} onSessionEnded={onSessionEnded} />
+                    </td>
+                    <td>{o.isAdmin ? "Yes" : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </div>
+          )}
+        </>
+      )}
       <h2>Add an Operator</h2>
       {isAdmin ? (
         <form class="stack" onSubmit={submit}>
@@ -308,6 +478,18 @@ export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSes
               value={username}
               onInput={(e) => {
                 setUsername(e.currentTarget.value);
+              }}
+              required
+            />
+          </label>
+          <label>
+            Email address
+            <input
+              type="email"
+              autocomplete="off"
+              value={email}
+              onInput={(e) => {
+                setEmail(e.currentTarget.value);
               }}
               required
             />

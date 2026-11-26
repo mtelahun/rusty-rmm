@@ -483,9 +483,14 @@ mod tests {
         let mut ids = Vec::new();
         for name in ["alice", "bob"] {
             ids.push(
-                crate::operators::add_operator(pool, name, "correct horse battery")
-                    .await
-                    .unwrap(),
+                crate::operators::add_operator(
+                    pool,
+                    name,
+                    "correct horse battery",
+                    &format!("{name}@example.com"),
+                )
+                .await
+                .unwrap(),
             );
         }
         sqlx::query(
