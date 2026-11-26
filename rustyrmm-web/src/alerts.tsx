@@ -265,7 +265,10 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
               act(api.addAlertAction({ id: selected.id, text: note }));
             }}
           >
-            <input aria-label="Action note" maxLength={200} value={note} onInput={(e) => setNote(e.currentTarget.value)} required />
+            <label>
+              What did you do?{" "}
+              <input aria-label="Action note" maxLength={200} value={note} onInput={(e) => setNote(e.currentTarget.value)} required />
+            </label>
             <button type="submit">Add action</button>
           </form>
         </section>
