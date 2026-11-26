@@ -36,10 +36,20 @@ service OperatorService {
   rpc ListPairingTokens(ListPairingTokensRequest) returns (ListPairingTokensResponse);
   rpc RevokePairingToken(RevokePairingTokenRequest) returns (RevokePairingTokenResponse);
 
+  // Admin only. Replaces the offline threshold (5..=43200 minutes) and the recipient list;
+  // recipients must be Operators with access to the Environment (INVALID_ARGUMENT otherwise).
+  rpc SetEnvironmentAlertSettings(SetEnvironmentAlertSettingsRequest) returns (Environment);
+
   rpc ListEndpoints(ListEndpointsRequest) returns (ListEndpointsResponse);
   rpc GetEndpoint(GetEndpointRequest) returns (Endpoint);
   rpc RevokeEndpoint(RevokeEndpointRequest) returns (RevokeEndpointResponse);
   rpc DeleteEndpoint(DeleteEndpointRequest) returns (DeleteEndpointResponse);
+  rpc SetEndpointAlertSettings(SetEndpointAlertSettingsRequest) returns (Endpoint);
+
+  // The calling Operator's own Notifications, newest first.
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+  rpc MarkNotificationRead(MarkNotificationReadRequest) returns (MarkNotificationReadResponse);
+  rpc MarkAllNotificationsRead(MarkAllNotificationsReadRequest) returns (MarkAllNotificationsReadResponse);
 
   rpc ListSamples(ListSamplesRequest) returns (ListSamplesResponse);
   // Live request over the Endpoint's Session; nothing is stored.
@@ -111,6 +121,16 @@ message Environment {
   string id = 1;
   string name = 2;
   google.protobuf.Timestamp created_at = 3;
+  // Minutes Offline before an Endpoint's Alert opens (unless the Endpoint overrides it).
+  uint32 offline_threshold_minutes = 4;
+  // Usernames of the Operators notified about this Environment's Alerts.
+  repeated string alert_recipients = 5;
+}
+
+message SetEnvironmentAlertSettingsRequest {
+  string environment_id = 1;
+  uint32 offline_threshold_minutes = 2;
+  repeated string alert_recipients = 3;
 }
 
 message CreateEnvironmentRequest {
@@ -181,7 +201,58 @@ message Endpoint {
   optional google.protobuf.Timestamp last_seen_at = 7;
   // Latest Inventory; absent until the Agent first sends one.
   optional rustyrmm.common.v1.Inventory inventory = 8;
+  bool alerts_enabled = 9;
+  // This Endpoint's own offline threshold in minutes; absent means the Environment's.
+  optional uint32 offline_threshold_minutes = 10;
+  // An Alert is open: the Endpoint has been Offline past its threshold.
+  bool alert_open = 11;
 }
+
+message SetEndpointAlertSettingsRequest {
+  string endpoint_id = 1;
+  bool alerts_enabled = 2;
+  // 5..=43200 minutes; absent clears the override.
+  optional uint32 offline_threshold_minutes = 3;
+}
+
+// --- Notifications ---
+
+enum NotificationKind {
+  NOTIFICATION_KIND_UNSPECIFIED = 0;
+  NOTIFICATION_KIND_WENT_OFFLINE = 1;
+  NOTIFICATION_KIND_BACK_ONLINE = 2;
+}
+
+message Notification {
+  string id = 1;
+  string hostname = 2;
+  string environment_id = 3;
+  NotificationKind kind = 4;
+  google.protobuf.Timestamp last_seen_at = 5;
+  // How long the Endpoint was Offline; back online only.
+  optional google.protobuf.Duration offline_duration = 6;
+  google.protobuf.Timestamp created_at = 7;
+  // Absent while unread.
+  optional google.protobuf.Timestamp read_at = 8;
+}
+
+message ListNotificationsRequest {
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListNotificationsResponse {
+  repeated Notification notifications = 1;
+  string next_page_token = 2;
+}
+
+message MarkNotificationReadRequest {
+  string id = 1;
+}
+message MarkNotificationReadResponse {}
+
+message MarkAllNotificationsReadRequest {}
+message MarkAllNotificationsReadResponse {}
 
 message ListEndpointsRequest {
   optional string environment_id = 1;

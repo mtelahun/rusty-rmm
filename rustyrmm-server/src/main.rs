@@ -108,12 +108,17 @@ async fn main() -> anyhow::Result<()> {
             };
             let pool = db::connect(&database_url).await?;
             let ca = Arc::new(ca::Ca::load_or_create(&state_dir)?);
-            tokio::spawn(jobs::run(pool.clone(), retention));
+            let sessions = Arc::new(sessions::Sessions::default());
+            tokio::spawn(jobs::run(
+                pool.clone(),
+                retention,
+                sessions.clone(),
+                chrono::Utc::now(),
+            ));
             println!(
                 "Agent CA fingerprint (SHA-256): {}",
                 ca.fingerprint_sha256()
             );
-            let sessions = Arc::new(sessions::Sessions::default());
             let operator_api = operator_service::OperatorApi {
                 pool: pool.clone(),
                 sessions: sessions.clone(),
