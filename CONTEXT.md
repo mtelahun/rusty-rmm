@@ -53,7 +53,7 @@ A reusable, expiring secret tied to one Environment that authorizes Pairing. Ope
 _Avoid_: Enrollment key, invite
 
 **Alert**:
-An Endpoint's offline condition: opened when it has been Offline past its threshold, resolved when it is Online again. At most one is open per Endpoint, so one outage is one Alert.
+An Endpoint's offline condition: opened when it has been Offline past its threshold, resolved when it is Online again. At most one is open per Endpoint, so one outage is one Alert. Has a severity (informational, warning or error; offline Alerts are warnings). An Operator can snooze an open Alert for 12 hours (it leaves the unhandled count, not the Alert), resolve it by hand (the Endpoint then gets no new Alert until it has been seen Online), and attach action notes: short one-line comments on what was done.
 _Avoid_: Incident, alarm
 
 **Notification**:

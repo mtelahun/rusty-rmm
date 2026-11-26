@@ -278,3 +278,82 @@ tr.selected {
   gap: 0.5rem;
   align-items: center;
 }
+
+.header-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.bell {
+  position: relative;
+}
+
+.bell-button.muted {
+  opacity: 0.5;
+}
+
+.bell-button.active {
+  border-color: var(--bad);
+  font-weight: 600;
+}
+
+.bell-count {
+  margin-left: 0.25rem;
+  color: var(--bad);
+}
+
+.bell-menu {
+  position: absolute;
+  right: 0;
+  z-index: 1;
+  margin: 0.25rem 0 0;
+  padding: 0.5rem 0.75rem;
+  min-width: 12rem;
+  list-style: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.bell-menu li {
+  padding: 0.25rem 0;
+}
+
+tr.clickable {
+  cursor: pointer;
+}
+
+tr[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.alert-detail {
+  margin-top: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.alert-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.alert-detail dt {
+  color: var(--muted);
+}
+
+.alert-detail dd {
+  margin: 0;
+}
+
+.alert-detail .actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.alert-detail .actions input {
+  flex: 1;
+}
