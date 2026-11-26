@@ -53,7 +53,17 @@ export function Notifications({ onSessionEnded, onChanged }: { onSessionEnded: (
       ) : items.length === 0 ? (
         <p class="muted">No Notifications.</p>
       ) : (
+        <div class="scroll">
         <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Hostname</th>
+              <th>Last seen</th>
+              <th>Duration</th>
+              <th></th>
+            </tr>
+          </thead>
           <tbody>
             {items.map((n) => (
               <tr key={n.id} class={n.readAt ? undefined : "unread"}>
@@ -73,6 +83,7 @@ export function Notifications({ onSessionEnded, onChanged }: { onSessionEnded: (
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {next && <button onClick={() => void load(next)}>Load more</button>}
     </main>
