@@ -1,5 +1,6 @@
 //! Background jobs run on a timer inside the Server: Command timeouts, Sample rollups, retention.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::commands;
+use crate::email;
 use crate::sessions::Sessions;
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +39,7 @@ pub async fn run(
     retention: Retention,
     sessions: Arc<Sessions>,
     started_at: DateTime<Utc>,
+    public_url: Option<String>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     for n in 0u64..=u64::MAX {
@@ -47,7 +50,14 @@ pub async fn run(
         );
         report(
             "offline alerts",
-            check_offline_alerts(&pool, &sessions, started_at, Utc::now()).await,
+            check_offline_alerts(
+                &pool,
+                &sessions,
+                started_at,
+                Utc::now(),
+                public_url.as_deref(),
+            )
+            .await,
         );
         if n % 5 == 0 {
             report("sample rollup", rollup_samples(&pool).await);
@@ -71,6 +81,7 @@ const BACK_ONLINE: i16 = 2;
 struct AlertCandidate {
     id: Uuid,
     environment_id: Uuid,
+    environment_name: String,
     hostname: String,
     last_seen_at: Option<DateTime<Utc>>,
     alerts_enabled: bool,
@@ -84,16 +95,19 @@ struct AlertCandidate {
 
 /// Opens an Alert for each Endpoint that has been Offline past its threshold, and resolves the
 /// open Alerts of Endpoints that are Online again (or no longer alerting). Notifies the
-/// Environment's recipients who still have access. An Endpoint whose last Alert was resolved by hand
-/// gets no new one until it has been seen Online. Returns the Alerts opened plus resolved.
+/// Environment's recipients who still have access: a dashboard Notification each, and with
+/// `public_url` (email is configured) one queued digest email per emailed recipient and
+/// Environment. An Endpoint whose last Alert was resolved by hand gets no new one until it has
+/// been seen Online. Returns the Alerts opened plus resolved.
 pub async fn check_offline_alerts(
     pool: &PgPool,
     sessions: &Sessions,
     started_at: DateTime<Utc>,
     now: DateTime<Utc>,
+    public_url: Option<&str>,
 ) -> sqlx::Result<u64> {
     let candidates: Vec<AlertCandidate> = sqlx::query_as(
-        "SELECT e.id, e.environment_id, e.hostname, e.last_seen_at, e.alerts_enabled,
+        "SELECT e.id, e.environment_id, env.name AS environment_name, e.hostname, e.last_seen_at, e.alerts_enabled,
                 e.revoked_at IS NOT NULL AS revoked,
                 coalesce(e.offline_threshold_minutes, env.offline_threshold_minutes)
                     AS threshold_minutes,
@@ -109,11 +123,14 @@ pub async fn check_offline_alerts(
     .fetch_all(pool)
     .await?;
     let mut changed = 0;
+    // (Operator, Environment) to the Environment's name and the Endpoints that changed.
+    let mut digests: BTreeMap<(Uuid, Uuid), (String, Vec<email::Change>)> = BTreeMap::new();
     for c in candidates {
         let online = sessions.is_online(c.id);
         let threshold = chrono::Duration::minutes(c.threshold_minutes.into());
         let mut tx = pool.begin().await?;
         // (kind, last_seen_at, offline_seconds) of the Notification to send, if any.
+        let mut pending = Vec::new();
         let notify = match (c.alert_id, c.last_seen_at) {
             (Some(alert), _) if !c.alerts_enabled || c.revoked || online => {
                 sqlx::query("UPDATE alerts SET resolved_at = $2 WHERE id = $1")
@@ -157,8 +174,9 @@ pub async fn check_offline_alerts(
             _ => continue,
         };
         if let Some((kind, seen, offline_seconds)) = notify {
-            let recipients: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT r.operator_id FROM environment_alert_recipients r
+            let recipients: Vec<(Uuid, bool, bool)> = sqlx::query_as(
+                "SELECT r.operator_id, r.dashboard, r.email AND o.email IS NOT NULL
+                 FROM environment_alert_recipients r
                  JOIN operators o ON o.id = r.operator_id
                  WHERE r.environment_id = $1
                    AND (o.is_admin OR EXISTS (SELECT 1 FROM environment_members m
@@ -168,7 +186,21 @@ pub async fn check_offline_alerts(
             .bind(c.environment_id)
             .fetch_all(&mut *tx)
             .await?;
-            for operator_id in recipients {
+            for (operator_id, dashboard, email) in recipients {
+                if email && public_url.is_some() {
+                    pending.push((
+                        operator_id,
+                        email::Change {
+                            endpoint_id: c.id,
+                            hostname: c.hostname.clone(),
+                            last_seen_at: seen,
+                            offline_seconds,
+                        },
+                    ));
+                }
+                if !dashboard {
+                    continue;
+                }
                 sqlx::query(
                     "INSERT INTO notifications (id, operator_id, environment_id, hostname, kind,
                                                 last_seen_at, offline_seconds, created_at)
@@ -187,7 +219,30 @@ pub async fn check_offline_alerts(
             }
         }
         tx.commit().await?;
+        for (operator_id, change) in pending {
+            digests
+                .entry((operator_id, c.environment_id))
+                .or_insert_with(|| (c.environment_name.clone(), Vec::new()))
+                .1
+                .push(change);
+        }
         changed += 1;
+    }
+    if let Some(public_url) = public_url {
+        for ((operator_id, _), (environment, changes)) in digests {
+            let (subject, body) = email::digest(&environment, public_url, &changes);
+            let queued = sqlx::query(
+                "INSERT INTO email_outbox (id, operator_id, subject, body) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(operator_id)
+            .bind(subject)
+            .bind(body)
+            .execute(pool)
+            .await;
+            // Not fatal: the Alerts and dashboard Notifications are already committed.
+            report("email enqueue", queued.map(|r| r.rows_affected()));
+        }
     }
     Ok(changed)
 }
@@ -552,6 +607,127 @@ mod tests {
         sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
     }
 
+    const URL: &str = "https://rmm.example.com/";
+
+    async fn set_channels(pool: &PgPool, operator: Uuid, dashboard: bool, email: bool) {
+        sqlx::query(
+            "UPDATE environment_alert_recipients SET dashboard = $2, email = $3
+             WHERE operator_id = $1",
+        )
+        .bind(operator)
+        .bind(dashboard)
+        .bind(email)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn offline_endpoints_become_one_digest_email_per_operator(pool: PgPool) {
+        let (env, alice, _) = alert_env(&pool).await;
+        set_channels(&pool, alice, true, true).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        let mut eps = Vec::new();
+        for _ in 0..3 {
+            eps.push(seen_endpoint(&pool, env, now, 60).await);
+        }
+        let sessions = Sessions::default();
+        check_offline_alerts(&pool, &sessions, started, now, Some(URL))
+            .await
+            .unwrap();
+
+        let rows: Vec<(Uuid, String, String)> =
+            sqlx::query_as("SELECT operator_id, subject, body FROM email_outbox")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, alice);
+        assert_eq!(rows[0].1, "3 Endpoints in lab went offline");
+        for ep in &eps {
+            assert!(rows[0]
+                .2
+                .contains(&format!("https://rmm.example.com/#/endpoints/{ep}")));
+        }
+        // Dashboard Notifications are unchanged: one per Endpoint per recipient.
+        assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 6);
+
+        // Two more go Offline while one comes Back Online: one mixed digest.
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let _reg = sessions.register(eps[0], tx);
+        seen_endpoint(&pool, env, now, 60).await;
+        seen_endpoint(&pool, env, now, 60).await;
+        sqlx::query("DELETE FROM email_outbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        check_offline_alerts(&pool, &sessions, started, now, Some(URL))
+            .await
+            .unwrap();
+        let (subject, body): (String, String) =
+            sqlx::query_as("SELECT subject, body FROM email_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(subject, "lab: 2 Endpoints went offline, 1 back online");
+        assert!(body.contains("Went offline:") && body.contains("Back online:"));
+    }
+
+    #[sqlx::test]
+    async fn only_recipients_with_email_on_and_an_address_are_emailed(pool: PgPool) {
+        let (env, alice, bob) = alert_env(&pool).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        seen_endpoint(&pool, env, now, 60).await;
+        let sessions = Sessions::default();
+
+        // Email off for alice; bob wants email but has no address.
+        set_channels(&pool, bob, true, true).await;
+        sqlx::query("UPDATE operators SET email = NULL WHERE id = $1")
+            .bind(bob)
+            .execute(&pool)
+            .await
+            .unwrap();
+        check_offline_alerts(&pool, &sessions, started, now, Some(URL))
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT count(*) FROM email_outbox").await, 0);
+
+        // SMTP off: nothing is queued even for an emailed recipient.
+        set_channels(&pool, alice, true, true).await;
+        let ep = seen_endpoint(&pool, env, now, 60).await;
+        sqlx::query("DELETE FROM alerts WHERE endpoint_id = $1")
+            .bind(ep)
+            .execute(&pool)
+            .await
+            .unwrap();
+        check_offline_alerts(&pool, &sessions, started, now, None)
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT count(*) FROM email_outbox").await, 0);
+
+        // Dashboard off, email on: emailed but no dashboard Notification.
+        sqlx::query("DELETE FROM notifications")
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_channels(&pool, alice, false, true).await;
+        seen_endpoint(&pool, env, now, 60).await;
+        check_offline_alerts(&pool, &sessions, started, now, Some(URL))
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT count(*) FROM email_outbox").await, 1);
+        assert_eq!(
+            count(
+                &pool,
+                &format!("SELECT count(*) FROM notifications WHERE operator_id = '{alice}'")
+            )
+            .await,
+            0
+        );
+    }
+
     #[sqlx::test]
     async fn one_outage_is_one_alert_with_a_notification_per_recipient(pool: PgPool) {
         let (env, _, _) = alert_env(&pool).await;
@@ -561,13 +737,13 @@ mod tests {
         let sessions = Sessions::default();
 
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             0
@@ -591,13 +767,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         let _reg = sessions.register(ep, tx);
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             0
@@ -647,14 +823,14 @@ mod tests {
         // The Server started 5 minutes ago: Agents haven't had a threshold to reconnect.
         let just_started = now - chrono::Duration::minutes(5);
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, just_started, now)
+            check_offline_alerts(&pool, &sessions, just_started, now, None)
                 .await
                 .unwrap(),
             0
         );
 
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, long_ago, now)
+            check_offline_alerts(&pool, &sessions, long_ago, now, None)
                 .await
                 .unwrap(),
             1
@@ -686,7 +862,7 @@ mod tests {
         }
         let sessions = Sessions::default();
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             2
@@ -716,7 +892,7 @@ mod tests {
             .await
             .unwrap();
 
-        check_offline_alerts(&pool, &sessions, started, now)
+        check_offline_alerts(&pool, &sessions, started, now, None)
             .await
             .unwrap();
         assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 1);
@@ -735,7 +911,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            check_offline_alerts(&pool, &sessions, started, now)
+            check_offline_alerts(&pool, &sessions, started, now, None)
                 .await
                 .unwrap(),
             1
@@ -789,7 +965,7 @@ mod tests {
         let started = now - chrono::Duration::hours(2);
         let ep = seen_endpoint(&pool, env, now, 60).await;
         let sessions = Sessions::default();
-        check_offline_alerts(&pool, &sessions, started, now)
+        check_offline_alerts(&pool, &sessions, started, now, None)
             .await
             .unwrap();
         sqlx::query("UPDATE alerts SET resolved_at = now(), resolved_by_hand = true")
@@ -800,7 +976,7 @@ mod tests {
         // Still Offline: no new Alert, however many ticks.
         for _ in 0..2 {
             assert_eq!(
-                check_offline_alerts(&pool, &sessions, started, now)
+                check_offline_alerts(&pool, &sessions, started, now, None)
                     .await
                     .unwrap(),
                 0
@@ -811,7 +987,7 @@ mod tests {
         // Online clears the flag; going Offline again opens a new Alert.
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let reg = sessions.register(ep, tx);
-        check_offline_alerts(&pool, &sessions, started, now)
+        check_offline_alerts(&pool, &sessions, started, now, None)
             .await
             .unwrap();
         assert_eq!(
@@ -820,7 +996,7 @@ mod tests {
         );
         sessions.disconnect(ep);
         drop((reg, rx));
-        check_offline_alerts(&pool, &sessions, started, now)
+        check_offline_alerts(&pool, &sessions, started, now, None)
             .await
             .unwrap();
         assert_eq!(

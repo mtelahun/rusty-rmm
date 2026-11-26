@@ -96,6 +96,7 @@ async fn start(pool: PgPool) -> Rig {
         sessions,
         agent_address: agent_addr.to_string(),
         ca_fingerprint: ca.fingerprint_sha256(),
+        email_enabled: false,
     };
     tokio::spawn(operator_service::serve(
         api,

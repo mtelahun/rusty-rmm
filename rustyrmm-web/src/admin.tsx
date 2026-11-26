@@ -158,11 +158,20 @@ function OwnerForm({ environment, saved, failed }: { environment: Environment; s
 
 function AlertSettings({ environment, saved, failed }: { environment: Environment; saved: () => void; failed: (e: unknown) => void }) {
   const [threshold, setThreshold] = useState(environment.offlineThresholdMinutes.toString());
-  const [recipients, setRecipients] = useState(environment.alertRecipients);
+  const [recipients, setRecipients] = useState(
+    environment.alertRecipients.map(({ username, dashboard, email }) => ({ username, dashboard, email })),
+  );
   const [operators, setOperators] = useState<OperatorInfo[]>([]);
+  const [emailEnabled, setEmailEnabled] = useState(false);
   const [invalid, setInvalid] = useState(false);
 
   useEffect(() => {
+    api
+      .whoAmI({})
+      .then((r) => {
+        setEmailEnabled(r.emailEnabled);
+      })
+      .catch(failed);
     api
       .listOperators({})
       .then((r) => {
@@ -171,12 +180,16 @@ function AlertSettings({ environment, saved, failed }: { environment: Environmen
       .catch(failed);
   }, []);
 
-  const offered = operators.filter((o) => (o.isAdmin || o.environmentIds.includes(environment.id)) && !recipients.includes(o.username));
+  const offered = operators.filter((o) => (o.isAdmin || o.environmentIds.includes(environment.id)) && !recipients.some((r) => r.username === o.username));
+  const noChannel = recipients.some((r) => !r.dashboard && !r.email);
+  const setChannel = (username: string, channel: "dashboard" | "email", on: boolean) => {
+    setRecipients(recipients.map((r) => (r.username === username ? { ...r, [channel]: on } : r)));
+  };
   const save = (e: Event) => {
     e.preventDefault();
     const offlineThresholdMinutes = thresholdMinutes(threshold);
     setInvalid(offlineThresholdMinutes === undefined);
-    if (offlineThresholdMinutes === undefined) return;
+    if (offlineThresholdMinutes === undefined || noChannel) return;
     api
       .setEnvironmentAlertSettings({ environmentId: environment.id, offlineThresholdMinutes, alertRecipients: recipients })
       .then(saved)
@@ -197,9 +210,16 @@ function AlertSettings({ environment, saved, failed }: { environment: Environmen
               }}
             />
           </label>
-          <button type="submit">Save</button>
+          <button type="submit" disabled={noChannel}>
+            Save
+          </button>
         </form>
       </div>
+      {noChannel && (
+        <p class="error" role="alert">
+          Each recipient needs Dashboard, Email or both.
+        </p>
+      )}
       {invalid && (
         <p class="error" role="alert">
           {THRESHOLD_ERROR}
@@ -208,27 +228,53 @@ function AlertSettings({ environment, saved, failed }: { environment: Environmen
       <h4>Recipients</h4>
       {recipients.length === 0 && <p class="muted">No recipients.</p>}
       <ul>
-        {recipients.map((r) => (
-          <li key={r}>
-            {r}{" "}
-            <button
-              type="button"
-              aria-label={`Remove ${r}`}
-              onClick={() => {
-                setRecipients(recipients.filter((x) => x !== r));
-              }}
-            >
-              Remove
-            </button>
-          </li>
-        ))}
+        {recipients.map((r) => {
+          const address = operators.find((o) => o.username === r.username)?.email;
+          return (
+            <li key={r.username}>
+              {r.username}{" "}
+              <label>
+                <input
+                  type="checkbox"
+                  checked={r.dashboard}
+                  onChange={(e) => {
+                    setChannel(r.username, "dashboard", e.currentTarget.checked);
+                  }}
+                />{" "}
+                Dashboard
+              </label>{" "}
+              <label>
+                <input
+                  type="checkbox"
+                  checked={r.email}
+                  disabled={!emailEnabled}
+                  onChange={(e) => {
+                    setChannel(r.username, "email", e.currentTarget.checked);
+                  }}
+                />{" "}
+                Email
+              </label>{" "}
+              <button
+                type="button"
+                aria-label={`Remove ${r.username}`}
+                onClick={() => {
+                  setRecipients(recipients.filter((x) => x.username !== r.username));
+                }}
+              >
+                Remove
+              </button>
+              {r.email && operators.length > 0 && !address && <span class="muted"> No email address: will not receive email</span>}
+            </li>
+          );
+        })}
       </ul>
+      {!emailEnabled && <p class="muted">Email is off: the Server has no SMTP settings.</p>}
       {offered.length > 0 && (
         <select
           aria-label="Add recipient"
           value=""
           onChange={(e) => {
-            setRecipients([...recipients, e.currentTarget.value]);
+            setRecipients([...recipients, { username: e.currentTarget.value, dashboard: true, email: false }]);
           }}
         >
           <option value="">Add recipient…</option>

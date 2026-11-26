@@ -5,6 +5,7 @@ pub mod auth;
 pub mod ca;
 pub mod commands;
 pub mod db;
+pub mod email;
 pub mod ingest;
 pub mod jobs;
 pub mod operator_service;

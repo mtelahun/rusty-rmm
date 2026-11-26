@@ -38,6 +38,8 @@ pub struct OperatorApi {
     /// What Agents dial, for the Pairing one-liner (`host:port`).
     pub agent_address: String,
     pub ca_fingerprint: String,
+    /// Whether the Server has SMTP settings, so recipients may be emailed.
+    pub email_enabled: bool,
 }
 
 #[tonic::async_trait]
@@ -171,6 +173,19 @@ impl OperatorService for OperatorApi {
         let req = req.into_inner();
         let id = parse_id(&req.environment_id, "environment_id")?;
         let minutes = threshold(req.offline_threshold_minutes)?;
+        for r in &req.alert_recipients {
+            if !r.dashboard && !r.email {
+                return Err(Status::invalid_argument(format!(
+                    "{:?} needs the dashboard, email or both",
+                    r.username
+                )));
+            }
+            if r.email && !self.email_enabled {
+                return Err(Status::failed_precondition(
+                    "the Server has no email settings (SMTP)",
+                ));
+            }
+        }
         let mut tx = self.pool.begin().await.map_err(internal)?;
         let found =
             sqlx::query("UPDATE environments SET offline_threshold_minutes = $2 WHERE id = $1")
@@ -188,7 +203,12 @@ impl OperatorService for OperatorApi {
             .execute(&mut *tx)
             .await
             .map_err(internal)?;
-        for username in &req.alert_recipients {
+        for AlertRecipient {
+            username,
+            dashboard,
+            email,
+        } in &req.alert_recipients
+        {
             let (operator_id, has_access): (Uuid, bool) = sqlx::query_as(
                 "SELECT o.id, o.is_admin OR EXISTS (SELECT 1 FROM environment_members m
                                                     WHERE m.environment_id = $2 AND m.operator_id = o.id)
@@ -206,11 +226,13 @@ impl OperatorService for OperatorApi {
                 )));
             }
             sqlx::query(
-                "INSERT INTO environment_alert_recipients (environment_id, operator_id)
-                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO environment_alert_recipients (environment_id, operator_id, dashboard, email)
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
             )
             .bind(id)
             .bind(operator_id)
+            .bind(dashboard)
+            .bind(email)
             .execute(&mut *tx)
             .await
             .map_err(internal)?;
@@ -872,6 +894,7 @@ impl OperatorService for OperatorApi {
             username: operator.username,
             is_admin: operator.is_admin,
             email: operator.email,
+            email_enabled: self.email_enabled,
         }))
     }
 
@@ -995,6 +1018,12 @@ const ENVIRONMENT_SELECT: &str =
     "SELECT e.id, e.name, e.created_at, e.owner, e.offline_threshold_minutes,
         ARRAY(SELECT o.username::text FROM environment_alert_recipients r
               JOIN operators o ON o.id = r.operator_id
+              WHERE r.environment_id = e.id ORDER BY o.username),
+        ARRAY(SELECT r.dashboard FROM environment_alert_recipients r
+              JOIN operators o ON o.id = r.operator_id
+              WHERE r.environment_id = e.id ORDER BY o.username),
+        ARRAY(SELECT r.email FROM environment_alert_recipients r
+              JOIN operators o ON o.id = r.operator_id
               WHERE r.environment_id = e.id ORDER BY o.username)
      FROM environments e";
 type EnvironmentRow = (
@@ -1004,16 +1033,29 @@ type EnvironmentRow = (
     Option<String>,
     i32,
     Vec<String>,
+    Vec<bool>,
+    Vec<bool>,
 );
 
-fn environment((id, name, created_at, owner, minutes, recipients): EnvironmentRow) -> Environment {
+fn environment(
+    (id, name, created_at, owner, minutes, usernames, dashboards, emails): EnvironmentRow,
+) -> Environment {
     Environment {
         id: id.to_string(),
         name,
         created_at: Some(ts(created_at)),
         owner: owner.unwrap_or_default(),
         offline_threshold_minutes: minutes as u32,
-        alert_recipients: recipients,
+        alert_recipients: usernames
+            .into_iter()
+            .zip(dashboards)
+            .zip(emails)
+            .map(|((username, dashboard), email)| AlertRecipient {
+                username,
+                dashboard,
+                email,
+            })
+            .collect(),
     }
 }
 
@@ -1546,6 +1588,7 @@ mod tests {
             sessions: sessions.clone(),
             agent_address: "rmm.example:7443".into(),
             ca_fingerprint: "ab".repeat(32),
+            email_enabled: true,
         };
         tokio::spawn(serve(
             api,
@@ -1899,6 +1942,75 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn email_recipients_need_smtp_and_some_channel(pool: PgPool) {
+        operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
+            .await
+            .unwrap();
+        operators::set_admin(&pool, "admin", true).await.unwrap();
+        let env = Uuid::now_v7();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, 'lab')")
+            .bind(env)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (token, _) = auth::login(&pool, "admin", PASSWORD).await.unwrap();
+        let set = |dashboard, email| {
+            authed(
+                SetEnvironmentAlertSettingsRequest {
+                    environment_id: env.to_string(),
+                    offline_threshold_minutes: 15,
+                    alert_recipients: vec![AlertRecipient {
+                        username: "admin".into(),
+                        dashboard,
+                        email,
+                    }],
+                },
+                &token,
+            )
+        };
+        let api = |email_enabled| OperatorApi {
+            pool: pool.clone(),
+            sessions: Default::default(),
+            agent_address: String::new(),
+            ca_fingerprint: String::new(),
+            email_enabled,
+        };
+
+        let off = api(false);
+        assert_eq!(
+            code(off.set_environment_alert_settings(set(true, true)).await),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            code(off.set_environment_alert_settings(set(false, false)).await),
+            tonic::Code::InvalidArgument
+        );
+        let on = api(true);
+        assert_eq!(
+            code(on.set_environment_alert_settings(set(false, false)).await),
+            tonic::Code::InvalidArgument
+        );
+        let saved = on
+            .set_environment_alert_settings(set(false, true))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            (
+                saved.alert_recipients[0].dashboard,
+                saved.alert_recipients[0].email
+            ),
+            (false, true)
+        );
+        let who = on
+            .who_am_i(authed(WhoAmIRequest {}, &token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(who.email_enabled);
+    }
+
+    #[sqlx::test]
     async fn browser_cookie_is_set_on_grpc_web_login_and_only_counts_on_grpc_web(pool: PgPool) {
         operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
             .await
@@ -1908,6 +2020,7 @@ mod tests {
             sessions: Default::default(),
             agent_address: String::new(),
             ca_fingerprint: String::new(),
+            email_enabled: false,
         };
         let marked = |web: bool, cookie: Option<&str>| {
             let mut req = Request::new(ListEnvironmentsRequest::default());
@@ -2861,7 +2974,14 @@ mod tests {
                 SetEnvironmentAlertSettingsRequest {
                     environment_id: env.to_string(),
                     offline_threshold_minutes: minutes,
-                    alert_recipients: who.iter().map(|s| s.to_string()).collect(),
+                    alert_recipients: who
+                        .iter()
+                        .map(|s| AlertRecipient {
+                            username: s.to_string(),
+                            dashboard: true,
+                            email: false,
+                        })
+                        .collect(),
                 },
                 token,
             )
@@ -2915,8 +3035,14 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(
-            (set.offline_threshold_minutes, set.alert_recipients),
-            (20, vec!["admin".to_string(), "bob".to_string()])
+            (
+                set.offline_threshold_minutes,
+                set.alert_recipients
+                    .iter()
+                    .map(|r| (r.username.as_str(), r.dashboard, r.email))
+                    .collect::<Vec<_>>()
+            ),
+            (20, vec![("admin", true, false), ("bob", true, false)])
         );
         // A failed replace leaves the list untouched.
         client
