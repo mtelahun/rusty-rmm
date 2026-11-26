@@ -9,8 +9,9 @@
 # Windows/macOS Agent builds stay in CI).
 set -euo pipefail
 
-# One cargo target dir for every job, so worktrees don't each rebuild all deps.
-export CARGO_TARGET_DIR="${FACTORY_CARGO_TARGET_DIR:-$HOME/.cache/rusty-rmm-factory/target}"
+# One cargo target dir per worktree: jobs that change the protos overwrite each
+# other's generated code in a shared dir. Costs one cold build per job.
+export CARGO_TARGET_DIR="${FACTORY_CARGO_TARGET_DIR:-$HOME/.cache/rusty-rmm-factory/targets/$(basename "$(git rev-parse --show-toplevel)")}"
 
 # sqlx::test needs a Postgres server; start a throwaway one unless DATABASE_URL is set.
 if [[ -z "${DATABASE_URL:-}" ]]; then

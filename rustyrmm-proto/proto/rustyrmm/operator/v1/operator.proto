@@ -56,6 +56,17 @@ service OperatorService {
   rpc MarkNotificationRead(MarkNotificationReadRequest) returns (MarkNotificationReadResponse);
   rpc MarkAllNotificationsRead(MarkAllNotificationsReadRequest) returns (MarkAllNotificationsReadResponse);
 
+  // Alerts of the Environments the caller can access (Admins: all); others are NOT_FOUND.
+  rpc ListAlerts(ListAlertsRequest) returns (ListAlertsResponse);
+  // Open, unsnoozed Alerts.
+  rpc CountUnhandledAlerts(CountUnhandledAlertsRequest) returns (CountUnhandledAlertsResponse);
+  // FAILED_PRECONDITION when already resolved.
+  rpc ResolveAlert(AlertIdRequest) returns (Alert);
+  // Hides an open Alert from the unhandled count for 12 hours; FAILED_PRECONDITION when resolved.
+  rpc SnoozeAlert(AlertIdRequest) returns (Alert);
+  // Text is trimmed, 1..=200 characters, one line (INVALID_ARGUMENT otherwise).
+  rpc AddAlertAction(AddAlertActionRequest) returns (Alert);
+
   rpc ListSamples(ListSamplesRequest) returns (ListSamplesResponse);
   // Live request over the Endpoint's Session; nothing is stored.
   // UNAVAILABLE when Offline, DEADLINE_EXCEEDED after 10s without a reply.
@@ -289,6 +300,64 @@ message MarkNotificationReadResponse {}
 
 message MarkAllNotificationsReadRequest {}
 message MarkAllNotificationsReadResponse {}
+
+// --- Alerts ---
+
+enum AlertSeverity {
+  ALERT_SEVERITY_UNSPECIFIED = 0;
+  ALERT_SEVERITY_INFORMATIONAL = 1;
+  ALERT_SEVERITY_WARNING = 2;
+  ALERT_SEVERITY_ERROR = 3;
+}
+
+message Alert {
+  string id = 1;
+  string endpoint_id = 2;
+  string hostname = 3;
+  string environment_id = 4;
+  string environment_name = 5;
+  string agent_version = 6;
+  // Always "offline" for now.
+  string kind = 7;
+  AlertSeverity severity = 8;
+  string message = 9;
+  google.protobuf.Timestamp opened_at = 10;
+  optional google.protobuf.Timestamp resolved_at = 11;
+  // Present while snoozed (or once the snooze has lapsed).
+  optional google.protobuf.Timestamp snoozed_until = 12;
+  // The latest action note.
+  optional string last_action = 13;
+}
+
+message ListAlertsRequest {
+  optional string environment_id = 1;
+  optional AlertSeverity severity = 2;
+  // Only Alerts opened at or after this; absent means all time.
+  optional google.protobuf.Timestamp opened_after = 3;
+  bool include_snoozed = 4;
+  bool include_resolved = 5;
+  uint32 page_size = 6;
+  string page_token = 7;
+}
+
+message ListAlertsResponse {
+  repeated Alert alerts = 1;
+  string next_page_token = 2;
+}
+
+message CountUnhandledAlertsRequest {}
+message CountUnhandledAlertsResponse {
+  uint32 count = 1;
+}
+
+message AlertIdRequest {
+  string id = 1;
+}
+
+message AddAlertActionRequest {
+  string id = 1;
+  string text = 2;
+}
 
 message ListEndpointsRequest {
   optional string environment_id = 1;
