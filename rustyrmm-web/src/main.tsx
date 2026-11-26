@@ -3,6 +3,7 @@ import { useEffect, useState } from "preact/hooks";
 import type { Endpoint, Environment } from "./gen/rustyrmm/operator/v1/operator_pb";
 import { all, api, message, needsLogin, when } from "./api";
 import { Environments, Operators } from "./admin";
+import { AlertBell, AlertsOverview } from "./alerts";
 import { EndpointDetail } from "./detail";
 import "./style.css";
 
@@ -13,6 +14,7 @@ function App() {
   // A non-Admin who belongs to no Environment can't do anything yet.
   const [noAccess, setNoAccess] = useState(false);
   const [hash, setHash] = useState(location.hash);
+  const [alertCount, setAlertCount] = useState(0);
 
   useEffect(() => {
     const onHash = () => {
@@ -37,6 +39,23 @@ function App() {
   };
   useEffect(check, []);
 
+  const refreshAlertCount = () => {
+    api
+      .countUnhandledAlerts({})
+      .then((r) => setAlertCount(r.count))
+      .catch((e) => {
+        if (needsLogin(e)) setLoggedIn(false);
+      });
+  };
+  useEffect(() => {
+    if (!loggedIn) return;
+    refreshAlertCount();
+    const timer = setInterval(refreshAlertCount, 60_000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [loggedIn]);
+
   if (loggedIn === undefined) return <p class="muted">Loading…</p>;
   if (!loggedIn) return <Login onDone={check} />;
   const detailId = /^#\/endpoints\/([^/]+)$/.exec(hash)?.[1];
@@ -57,18 +76,23 @@ function App() {
           {nav("#/environments", "Environments", hash === "#/environments")}
           {nav("#/operators", "Operators", hash === "#/operators")}
         </nav>
-        <button
-          onClick={() => {
-            void api.logout({}).catch(() => {}).finally(() => setLoggedIn(false));
-          }}
-        >
-          Log out
-        </button>
+        <div class="header-actions">
+          <AlertBell count={alertCount} />
+          <button
+            onClick={() => {
+              void api.logout({}).catch(() => {}).finally(() => setLoggedIn(false));
+            }}
+          >
+            Log out
+          </button>
+        </div>
       </header>
       {detailId ? (
         <EndpointDetail id={detailId} onSessionEnded={endSession} />
       ) : hash === "#/environments" ? (
         <Environments isAdmin={isAdmin} onSessionEnded={endSession} />
+      ) : hash === "#/alerts" ? (
+        <AlertsOverview onSessionEnded={endSession} onChanged={refreshAlertCount} />
       ) : hash === "#/operators" ? (
         <Operators isAdmin={isAdmin} onSessionEnded={endSession} />
       ) : noAccess ? (

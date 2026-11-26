@@ -78,11 +78,14 @@ struct AlertCandidate {
     threshold_minutes: i32,
     alert_id: Option<Uuid>,
     alert_last_seen_at: Option<DateTime<Utc>>,
+    /// A past Alert was resolved by hand and the Endpoint has not been Online since.
+    hand_resolved: bool,
 }
 
 /// Opens an Alert for each Endpoint that has been Offline past its threshold, and resolves the
 /// open Alerts of Endpoints that are Online again (or no longer alerting). Notifies the
-/// Environment's recipients who still have access. Returns the Alerts opened plus resolved.
+/// Environment's recipients who still have access. An Endpoint whose last Alert was resolved by hand
+/// gets no new one until it has been seen Online. Returns the Alerts opened plus resolved.
 pub async fn check_offline_alerts(
     pool: &PgPool,
     sessions: &Sessions,
@@ -94,7 +97,9 @@ pub async fn check_offline_alerts(
                 e.revoked_at IS NOT NULL AS revoked,
                 coalesce(e.offline_threshold_minutes, env.offline_threshold_minutes)
                     AS threshold_minutes,
-                a.id AS alert_id, a.last_seen_at AS alert_last_seen_at
+                a.id AS alert_id, a.last_seen_at AS alert_last_seen_at,
+                EXISTS (SELECT 1 FROM alerts h
+                        WHERE h.endpoint_id = e.id AND h.resolved_by_hand) AS hand_resolved
          FROM endpoints e
          JOIN environments env ON env.id = e.environment_id
          LEFT JOIN alerts a ON a.endpoint_id = e.id AND a.resolved_at IS NULL
@@ -120,6 +125,19 @@ pub async fn check_offline_alerts(
                 let seen = c.alert_last_seen_at.unwrap_or(now);
                 (c.alerts_enabled && !c.revoked)
                     .then(|| (BACK_ONLINE, seen, Some((now - seen).num_seconds())))
+            }
+            // Resolved by hand: stay quiet until the Endpoint is seen Online.
+            (None, _) if c.hand_resolved => {
+                if online {
+                    sqlx::query(
+                        "UPDATE alerts SET resolved_by_hand = false WHERE endpoint_id = $1",
+                    )
+                    .bind(c.id)
+                    .execute(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                }
+                continue;
             }
             (None, Some(seen))
                 if !online && now - seen > threshold && now - started_at > threshold =>
@@ -760,5 +778,58 @@ mod tests {
             0
         );
         assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn an_alert_resolved_by_hand_stays_closed_until_the_endpoint_is_seen_online(
+        pool: PgPool,
+    ) {
+        let (env, _, _) = alert_env(&pool).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        let ep = seen_endpoint(&pool, env, now, 60).await;
+        let sessions = Sessions::default();
+        check_offline_alerts(&pool, &sessions, started, now)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE alerts SET resolved_at = now(), resolved_by_hand = true")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Still Offline: no new Alert, however many ticks.
+        for _ in 0..2 {
+            assert_eq!(
+                check_offline_alerts(&pool, &sessions, started, now)
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(count(&pool, "SELECT count(*) FROM alerts").await, 1);
+
+        // Online clears the flag; going Offline again opens a new Alert.
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let reg = sessions.register(ep, tx);
+        check_offline_alerts(&pool, &sessions, started, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM alerts WHERE resolved_by_hand").await,
+            0
+        );
+        sessions.disconnect(ep);
+        drop((reg, rx));
+        check_offline_alerts(&pool, &sessions, started, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM alerts WHERE resolved_at IS NULL"
+            )
+            .await,
+            1
+        );
     }
 }
