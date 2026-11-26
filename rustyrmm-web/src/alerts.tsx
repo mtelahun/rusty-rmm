@@ -196,6 +196,7 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
       ) : alerts.length === 0 ? (
         <p class="muted">No alerts match these filters.</p>
       ) : (
+        <div class="scroll">
         <table>
           <thead>
             <tr>
@@ -226,6 +227,7 @@ export function AlertsOverview({ onSessionEnded, onChanged }: { onSessionEnded: 
             ))}
           </tbody>
         </table>
+        </div>
       )}
       {selected && (
         <section class="alert-detail">
