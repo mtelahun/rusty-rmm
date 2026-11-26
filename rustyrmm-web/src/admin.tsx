@@ -199,92 +199,92 @@ function AlertSettings({ environment, saved, failed }: { environment: Environmen
     <section>
       <div class="toolbar">
         <h3>Alerts for {environment.name}</h3>
-        <form class="inline" onSubmit={save}>
-          <label>
-            Offline threshold (minutes){" "}
-            <input
-              inputMode="numeric"
-              value={threshold}
-              onInput={(e) => {
-                setThreshold(e.currentTarget.value);
-              }}
-            />
-          </label>
-          <button type="submit" disabled={noChannel}>
-            Save
-          </button>
-        </form>
       </div>
-      {noChannel && (
-        <p class="error" role="alert">
-          Each recipient needs Dashboard, Email or both.
-        </p>
-      )}
-      {invalid && (
-        <p class="error" role="alert">
-          {THRESHOLD_ERROR}
-        </p>
-      )}
-      <h4>Recipients</h4>
-      {recipients.length === 0 && <p class="muted">No recipients.</p>}
-      <ul>
-        {recipients.map((r) => {
-          const address = operators.find((o) => o.username === r.username)?.email;
-          return (
-            <li key={r.username}>
-              {r.username}{" "}
-              <label>
-                <input
-                  type="checkbox"
-                  checked={r.dashboard}
-                  onChange={(e) => {
-                    setChannel(r.username, "dashboard", e.currentTarget.checked);
+      <form onSubmit={save}>
+        <label>
+          Offline threshold (minutes){" "}
+          <input
+            inputMode="numeric"
+            value={threshold}
+            onInput={(e) => {
+              setThreshold(e.currentTarget.value);
+            }}
+          />
+        </label>
+        {noChannel && (
+          <p class="error" role="alert">
+            Each recipient needs Dashboard, Email or both.
+          </p>
+        )}
+        {invalid && (
+          <p class="error" role="alert">
+            {THRESHOLD_ERROR}
+          </p>
+        )}
+        <h4>Recipients</h4>
+        {recipients.length === 0 && <p class="muted">No recipients.</p>}
+        <ul>
+          {recipients.map((r) => {
+            const address = operators.find((o) => o.username === r.username)?.email;
+            return (
+              <li key={r.username}>
+                {r.username}{" "}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={r.dashboard}
+                    onChange={(e) => {
+                      setChannel(r.username, "dashboard", e.currentTarget.checked);
+                    }}
+                  />{" "}
+                  Dashboard
+                </label>{" "}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={r.email}
+                    disabled={!emailEnabled}
+                    onChange={(e) => {
+                      setChannel(r.username, "email", e.currentTarget.checked);
+                    }}
+                  />{" "}
+                  Email
+                </label>{" "}
+                <button
+                  type="button"
+                  aria-label={`Remove ${r.username}`}
+                  onClick={() => {
+                    setRecipients(recipients.filter((x) => x.username !== r.username));
                   }}
-                />{" "}
-                Dashboard
-              </label>{" "}
-              <label>
-                <input
-                  type="checkbox"
-                  checked={r.email}
-                  disabled={!emailEnabled}
-                  onChange={(e) => {
-                    setChannel(r.username, "email", e.currentTarget.checked);
-                  }}
-                />{" "}
-                Email
-              </label>{" "}
-              <button
-                type="button"
-                aria-label={`Remove ${r.username}`}
-                onClick={() => {
-                  setRecipients(recipients.filter((x) => x.username !== r.username));
-                }}
-              >
-                Remove
-              </button>
-              {r.email && operators.length > 0 && !address && <span class="muted"> No email address: will not receive email</span>}
-            </li>
-          );
-        })}
-      </ul>
-      {!emailEnabled && <p class="muted">Email is off: the Server has no SMTP settings.</p>}
-      {offered.length > 0 && (
-        <select
-          aria-label="Add recipient"
-          value=""
-          onChange={(e) => {
-            setRecipients([...recipients, { username: e.currentTarget.value, dashboard: true, email: false }]);
-          }}
-        >
-          <option value="">Add recipient…</option>
-          {offered.map((o) => (
-            <option key={o.username} value={o.username}>
-              {o.username}
-            </option>
-          ))}
-        </select>
-      )}
+                >
+                  Remove
+                </button>
+                {r.email && operators.length > 0 && !address && <span class="muted"> No email address: will not receive email</span>}
+              </li>
+            );
+          })}
+        </ul>
+        {!emailEnabled && <p class="muted">Email is off: the Server has no SMTP settings.</p>}
+        {offered.length > 0 && (
+          <select
+            aria-label="Add recipient"
+            value=""
+            onChange={(e) => {
+              setRecipients([...recipients, { username: e.currentTarget.value, dashboard: true, email: false }]);
+            }}
+          >
+            <option value="">Add recipient…</option>
+            {offered.map((o) => (
+              <option key={o.username} value={o.username}>
+                {o.username}
+              </option>
+            ))}
+          </select>
+        )}
+        <button type="submit" disabled={noChannel}>
+          Save
+        </button>
+      </form>
     </section>
   );
 }
