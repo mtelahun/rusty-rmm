@@ -185,10 +185,14 @@ enum OperatorCmd {
     /// Add an Operator; prompts for their password.
     Add {
         username: String,
+        /// Email address, used for Notifications.
+        email: String,
         #[arg(long)]
         password_stdin: bool,
     },
-    /// List Operators with their Admin flag and Environments (Admins only).
+    /// Set an Operator's email address (your own, or anyone's as an Admin).
+    Email { username: String, email: String },
+    /// List Operators with their Admin flag, email and Environments (Admins only).
     List,
     /// Add or remove an Operator from the Admin group.
     Admin {
@@ -664,6 +668,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             command:
                 OperatorCmd::Add {
                     username,
+                    email,
                     password_stdin,
                 },
         } => {
@@ -672,6 +677,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let req = api.req(AddOperatorRequest {
                 username: username.clone(),
                 password,
+                email,
             });
             let r = api
                 .client
@@ -680,6 +686,17 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .map_err(status)?
                 .into_inner();
             println!("Added Operator {username} ({})", r.operator_id);
+        }
+        Cmd::Operator {
+            command: OperatorCmd::Email { username, email },
+        } => {
+            let mut api = Api::from_saved().await?;
+            let req = api.req(SetOperatorEmailRequest {
+                username: username.clone(),
+                email,
+            });
+            api.client.set_operator_email(req).await.map_err(status)?;
+            println!("Set the email address of {username}");
         }
         Cmd::Operator {
             command: OperatorCmd::List,
@@ -697,14 +714,19 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 .into_iter()
                 .map(|e| (e.id, e.name))
                 .collect();
-            let mut t = Table::new(&["username", "admin", "environments"]);
+            let mut t = Table::new(&["username", "email", "admin", "environments"]);
             for o in r.operators {
                 let envs: Vec<_> = o
                     .environment_ids
                     .iter()
                     .map(|id| names.get(id).unwrap_or(id).as_str())
                     .collect();
-                t.row(vec![o.username, o.is_admin.to_string(), envs.join(", ")]);
+                t.row(vec![
+                    o.username,
+                    o.email.unwrap_or_default(),
+                    o.is_admin.to_string(),
+                    envs.join(", "),
+                ]);
             }
             println!("{}", t.render(json));
         }

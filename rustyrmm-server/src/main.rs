@@ -69,7 +69,7 @@ enum Command {
 #[derive(Subcommand)]
 enum OperatorCommand {
     /// Create an Operator; prompts for the password.
-    Add { username: String },
+    Add { username: String, email: String },
 }
 
 #[tokio::main]
@@ -142,14 +142,14 @@ async fn main() -> anyhow::Result<()> {
             )?;
         }
         Command::Operator {
-            command: OperatorCommand::Add { username },
+            command: OperatorCommand::Add { username, email },
         } => {
             let password = rpassword::prompt_password("Password: ")?;
             if rpassword::prompt_password("Confirm password: ")? != password {
                 anyhow::bail!("passwords do not match");
             }
             let pool = db::connect(&database_url).await?;
-            let id = operators::add_operator(&pool, &username, &password).await?;
+            let id = operators::add_operator(&pool, &username, &password, &email).await?;
             println!("Created Operator {username} ({id})");
         }
     }
