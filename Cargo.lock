@@ -2161,7 +2161,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustyrmm-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2193,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "rustyrmm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "rustyrmm-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "rustyrmm-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",
