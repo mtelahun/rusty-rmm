@@ -21,6 +21,10 @@ service OperatorService {
   rpc AddOperator(AddOperatorRequest) returns (AddOperatorResponse);
   // The calling Operator.
   rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  // The target Operator or an Admin; otherwise PERMISSION_DENIED. INVALID_ARGUMENT for a bad
+  // address, ALREADY_EXISTS when another Operator has it (compared ignoring case), NOT_FOUND for
+  // an unknown username.
+  rpc SetOperatorEmail(SetOperatorEmailRequest) returns (SetOperatorEmailResponse);
   // The rest of the Operator management RPCs are Admin only.
   rpc ListOperators(ListOperatorsRequest) returns (ListOperatorsResponse);
   // Idempotent. FAILED_PRECONDITION when removing the last Admin.
@@ -70,6 +74,8 @@ message LogoutResponse {}
 message AddOperatorRequest {
   string username = 1;
   string password = 2;
+  // Required. INVALID_ARGUMENT if not a plausible address, ALREADY_EXISTS if taken.
+  string email = 3;
 }
 
 message AddOperatorResponse {
@@ -80,7 +86,15 @@ message WhoAmIRequest {}
 message WhoAmIResponse {
   string username = 1;
   bool is_admin = 2;
+  // Unset for Operators that have none yet.
+  optional string email = 3;
 }
+
+message SetOperatorEmailRequest {
+  string username = 1;
+  string email = 2;
+}
+message SetOperatorEmailResponse {}
 
 message ListOperatorsRequest {}
 message OperatorInfo {
@@ -88,6 +102,8 @@ message OperatorInfo {
   bool is_admin = 2;
   // Environments the Operator is a member of (Admins reach all regardless).
   repeated string environment_ids = 3;
+  // Unset when the Operator has none yet.
+  optional string email = 4;
 }
 message ListOperatorsResponse {
   repeated OperatorInfo operators = 1;

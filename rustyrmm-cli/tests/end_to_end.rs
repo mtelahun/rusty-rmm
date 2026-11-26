@@ -102,7 +102,7 @@ async fn start(pool: PgPool) -> Rig {
         operator_service::tls_config(&cert.pem(), &key.serialize_pem()),
         operator_listener,
     ));
-    operators::add_operator(&pool, "admin", PASSWORD)
+    operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
         .await
         .unwrap();
     Rig {

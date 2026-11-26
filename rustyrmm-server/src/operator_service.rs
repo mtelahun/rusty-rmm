@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, authenticate, internal, Operator};
 use crate::commands::{self, DispatchError, NewCommand};
-use crate::operators::{self, AddOperatorError, SetAdminError};
+use crate::operators::{self, AddOperatorError, SetAdminError, SetEmailError};
 use crate::pairing;
 use crate::sessions::{LiveError, Sessions};
 
@@ -76,14 +76,21 @@ impl OperatorService for OperatorApi {
         req: Request<AddOperatorRequest>,
     ) -> Result<Response<AddOperatorResponse>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
-        let AddOperatorRequest { username, password } = req.into_inner();
-        let id = operators::add_operator(&self.pool, &username, &password)
+        let AddOperatorRequest {
+            username,
+            password,
+            email,
+        } = req.into_inner();
+        let id = operators::add_operator(&self.pool, &username, &password, &email)
             .await
             .map_err(|e| match e {
-                AddOperatorError::UsernameTaken(_) => Status::already_exists(e.to_string()),
-                AddOperatorError::InvalidUsername | AddOperatorError::PasswordTooShort => {
-                    Status::invalid_argument(e.to_string())
+                AddOperatorError::UsernameTaken(_) | AddOperatorError::EmailTaken(_) => {
+                    Status::already_exists(e.to_string())
                 }
+                AddOperatorError::InvalidUsername
+                | AddOperatorError::PasswordTooShort
+                | AddOperatorError::EmptyEmail
+                | AddOperatorError::InvalidEmail => Status::invalid_argument(e.to_string()),
                 e => internal(e),
             })?;
         Ok(Response::new(AddOperatorResponse {
@@ -531,7 +538,30 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(WhoAmIResponse {
             username: operator.username,
             is_admin: operator.is_admin,
+            email: operator.email,
         }))
+    }
+
+    async fn set_operator_email(
+        &self,
+        req: Request<SetOperatorEmailRequest>,
+    ) -> Result<Response<SetOperatorEmailResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let SetOperatorEmailRequest { username, email } = req.into_inner();
+        if !operator.is_admin && operator.username != username {
+            return Err(Status::permission_denied(
+                "only Admins may change another Operator's email address",
+            ));
+        }
+        operators::set_email(&self.pool, &username, &email)
+            .await
+            .map_err(|e| match e {
+                SetEmailError::Invalid(_) => Status::invalid_argument(e.to_string()),
+                SetEmailError::EmailTaken(_) => Status::already_exists(e.to_string()),
+                SetEmailError::NoSuchOperator(_) => Status::not_found(e.to_string()),
+                e => internal(e),
+            })?;
+        Ok(Response::new(SetOperatorEmailResponse {}))
     }
 
     async fn list_operators(
@@ -540,8 +570,8 @@ impl OperatorService for OperatorApi {
     ) -> Result<Response<ListOperatorsResponse>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
         // Not paged: there are few Operators.
-        let rows: Vec<(String, bool, Vec<Uuid>)> = sqlx::query_as(
-            "SELECT o.username, o.is_admin,
+        let rows: Vec<(String, bool, Option<String>, Vec<Uuid>)> = sqlx::query_as(
+            "SELECT o.username, o.is_admin, o.email,
                     coalesce(array_agg(m.environment_id ORDER BY m.environment_id)
                              FILTER (WHERE m.environment_id IS NOT NULL), '{}')
              FROM operators o LEFT JOIN environment_members m ON m.operator_id = o.id
@@ -553,9 +583,10 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(ListOperatorsResponse {
             operators: rows
                 .into_iter()
-                .map(|(username, is_admin, ids)| OperatorInfo {
+                .map(|(username, is_admin, email, ids)| OperatorInfo {
                     username,
                     is_admin,
+                    email,
                     environment_ids: ids.iter().map(Uuid::to_string).collect(),
                 })
                 .collect(),
@@ -999,7 +1030,7 @@ mod tests {
             tls_config(&cert.pem(), &key.serialize_pem()),
             listener,
         ));
-        operators::add_operator(&pool, "admin", PASSWORD)
+        operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
             .await
             .unwrap();
         let channel = Channel::from_shared(format!("https://{addr}"))
@@ -1177,6 +1208,7 @@ mod tests {
                 AddOperatorRequest {
                     username: "bob".into(),
                     password: PASSWORD.into(),
+                    email: "bob@example.com".into(),
                 },
                 &token,
             ))
@@ -1210,7 +1242,7 @@ mod tests {
 
     #[sqlx::test]
     async fn browser_cookie_is_set_on_grpc_web_login_and_only_counts_on_grpc_web(pool: PgPool) {
-        operators::add_operator(&pool, "admin", PASSWORD)
+        operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
             .await
             .unwrap();
         let api = OperatorApi {
@@ -1669,6 +1701,7 @@ mod tests {
                 AddOperatorRequest {
                     username: name.into(),
                     password: PASSWORD.into(),
+                    email: format!("{name}@example.com"),
                 },
                 admin,
             ))
@@ -1919,7 +1952,8 @@ mod tests {
                     .add_operator(authed(
                         AddOperatorRequest {
                             username: "eve".into(),
-                            password: PASSWORD.into()
+                            password: PASSWORD.into(),
+                            email: "eve@example.com".into()
                         },
                         &bob
                     ))
@@ -2067,5 +2101,121 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("admin", false), ("bob", true)]
         );
+    }
+
+    #[sqlx::test]
+    async fn operator_emails(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        add_user(&mut client, &admin, "bob").await;
+        add_user(&mut client, &admin, "carol").await;
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let set = |name: &str, email: &str| SetOperatorEmailRequest {
+            username: name.into(),
+            email: email.into(),
+        };
+        let email_of = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT email FROM operators WHERE username = $1",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Add Operator validates the address.
+        let add = |email: &str| AddOperatorRequest {
+            username: "dave".into(),
+            password: PASSWORD.into(),
+            email: email.into(),
+        };
+        let err = client
+            .add_operator(authed(add("a@b"), &admin))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("email"));
+        assert_eq!(
+            code(
+                client
+                    .add_operator(authed(add("Bob@EXAMPLE.com"), &admin))
+                    .await
+            ),
+            tonic::Code::AlreadyExists
+        );
+
+        // Own address: allowed; someone else's: denied and unchanged.
+        client
+            .set_operator_email(authed(set("bob", "new@example.com"), &bob))
+            .await
+            .unwrap();
+        assert_eq!(email_of("bob").await.as_deref(), Some("new@example.com"));
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("carol", "x@example.com"), &bob))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            email_of("carol").await.as_deref(),
+            Some("carol@example.com")
+        );
+
+        // An Admin may change anyone's; unknown names are NOT_FOUND.
+        client
+            .set_operator_email(authed(set("carol", "c2@example.com"), &admin))
+            .await
+            .unwrap();
+        assert_eq!(email_of("carol").await.as_deref(), Some("c2@example.com"));
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("nobody", "x@example.com"), &admin))
+                    .await
+            ),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("carol", "NEW@example.com"), &admin))
+                    .await
+            ),
+            tonic::Code::AlreadyExists
+        );
+
+        // Lists and WhoAmI show emails; a null one is unset.
+        sqlx::query("UPDATE operators SET email = NULL WHERE username = 'admin'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ops = client
+            .list_operators(authed(ListOperatorsRequest {}, &admin))
+            .await
+            .unwrap()
+            .into_inner()
+            .operators;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.username.as_str(), o.email.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("admin", None),
+                ("bob", Some("new@example.com")),
+                ("carol", Some("c2@example.com"))
+            ]
+        );
+        let me = client
+            .who_am_i(authed(WhoAmIRequest {}, &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(me.email.as_deref(), Some("new@example.com"));
     }
 }
