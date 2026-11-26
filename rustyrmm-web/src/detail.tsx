@@ -2,8 +2,8 @@ import { Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { timestampDate, timestampFromDate, type Timestamp } from "@bufbuild/protobuf/wkt";
 import { Interpreter, type ProcessInfo, type Sample } from "./gen/rustyrmm/common/v1/common_pb";
-import { CommandStatus, type CommandRecord, type Endpoint } from "./gen/rustyrmm/operator/v1/operator_pb";
-import { all, api, message, needsLogin, when } from "./api";
+import { CommandStatus, type CommandRecord, type Endpoint, type Environment } from "./gen/rustyrmm/operator/v1/operator_pb";
+import { all, api, message, needsLogin, THRESHOLD_ERROR, thresholdMinutes, when } from "./api";
 
 const RANGES: [number, string][] = [
   [3600, "1 hour"],
@@ -99,11 +99,75 @@ export function EndpointDetail({ id, onSessionEnded }: { id: string; onSessionEn
         </div>
       </div>
       {error && <p class="error" role="alert">{error}</p>}
+      <AlertSettings key={endpoint.id} endpoint={endpoint} saved={load} failed={failed} />
       <Inventory endpoint={endpoint} />
       <Charts id={id} failed={failed} />
       <Processes id={id} failed={failed} />
       <Commands endpoint={endpoint} failed={failed} />
     </main>
+  );
+}
+
+function AlertSettings({ endpoint, saved, failed }: { endpoint: Endpoint; saved: () => void; failed: (e: unknown) => void }) {
+  const [enabled, setEnabled] = useState(endpoint.alertsEnabled);
+  const [threshold, setThreshold] = useState(endpoint.offlineThresholdMinutes?.toString() ?? "");
+  const [invalid, setInvalid] = useState(false);
+  const [environment, setEnvironment] = useState<Environment | undefined>(undefined);
+
+  useEffect(() => {
+    all(async (pageToken) => {
+      const r = await api.listEnvironments({ pageToken });
+      return { items: r.environments, next: r.nextPageToken };
+    })
+      .then((list) => {
+        setEnvironment(list.find((e) => e.id === endpoint.environmentId));
+      })
+      .catch(failed);
+  }, [endpoint.environmentId]);
+
+  const save = (e: Event) => {
+    e.preventDefault();
+    const blank = threshold.trim() === "";
+    const offlineThresholdMinutes = blank ? undefined : thresholdMinutes(threshold);
+    setInvalid(!blank && offlineThresholdMinutes === undefined);
+    if (!blank && offlineThresholdMinutes === undefined) return;
+    api.setEndpointAlertSettings({ endpointId: endpoint.id, alertsEnabled: enabled, offlineThresholdMinutes }).then(saved).catch(failed);
+  };
+  const effective = endpoint.offlineThresholdMinutes ?? environment?.offlineThresholdMinutes;
+  return (
+    <section>
+      <h3>Alerts</h3>
+      <form class="inline" onSubmit={save}>
+        <label>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onInput={(e) => {
+              setEnabled(e.currentTarget.checked);
+            }}
+          />{" "}
+          Alerts on
+        </label>
+        <label>
+          Offline threshold (minutes){" "}
+          <input
+            inputMode="numeric"
+            placeholder="Environment default"
+            value={threshold}
+            onInput={(e) => {
+              setThreshold(e.currentTarget.value);
+            }}
+          />
+        </label>
+        <button type="submit">Save</button>
+      </form>
+      {invalid && (
+        <p class="error" role="alert">
+          {THRESHOLD_ERROR}
+        </p>
+      )}
+      {effective !== undefined && <p class="muted">Alerts after about {effective} minutes offline.</p>}
+    </section>
   );
 }
 
