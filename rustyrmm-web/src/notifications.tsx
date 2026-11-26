@@ -45,7 +45,9 @@ export function Notifications({ onSessionEnded, onChanged }: { onSessionEnded: (
     <main>
       <div class="toolbar">
         <h2>Notifications</h2>
-        <button onClick={() => mark(() => api.markAllNotificationsRead({}))}>Mark all read</button>
+        <button onClick={() => {
+            mark(() => api.markAllNotificationsRead({}));
+          }}>Mark all read</button>
       </div>
       {error && <p class="error" role="alert">{error}</p>}
       {items === undefined ? (
@@ -75,7 +77,9 @@ export function Notifications({ onSessionEnded, onChanged }: { onSessionEnded: (
                   {!n.readAt && (
                     <>
                       <span class="badge">Unread</span>{" "}
-                      <button onClick={() => mark(() => api.markNotificationRead({ id: n.id }))}>Mark read</button>
+                      <button onClick={() => {
+                          mark(() => api.markNotificationRead({ id: n.id }));
+                        }}>Mark read</button>
                     </>
                   )}
                 </td>
