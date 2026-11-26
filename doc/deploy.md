@@ -77,7 +77,7 @@ The log shows the Agent CA fingerprint and both listeners. On first start the Se
 ## 7. First Operator
 
 ```sh
-sudo -u rustyrmm sh -c 'set -a; . /etc/rustyrmm/server.env; exec /opt/rustyrmm/bin/rustyrmm-server operator add admin'
+sudo -u rustyrmm sh -c 'set -a; . /etc/rustyrmm/server.env; exec /opt/rustyrmm/bin/rustyrmm-server operator add admin admin@example.com'
 ```
 
 Open `https://$RMM_HOST/` and log in.
