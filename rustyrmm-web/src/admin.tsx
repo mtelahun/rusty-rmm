@@ -297,6 +297,7 @@ function EmailEditor({ username, email, onSaved, onSessionEnded }: { username: s
       <>
         {email}{" "}
         <button
+          aria-label={`Edit email address of ${username}`}
           onClick={() => {
             setValue(email);
             setEditing(true);
@@ -308,7 +309,7 @@ function EmailEditor({ username, email, onSaved, onSessionEnded }: { username: s
     );
   }
   return (
-    <form onSubmit={save}>
+    <form class="inline" onSubmit={save}>
       <input
         type="email"
         aria-label={`Email address of ${username}`}
@@ -398,6 +399,7 @@ export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSes
         <>
           <h2>Operators</h2>
           {operators && (
+            <div class="scroll">
             <table>
               <thead>
                 <tr>
@@ -418,6 +420,7 @@ export function Operators({ isAdmin, onSessionEnded }: { isAdmin: boolean; onSes
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </>
       )}
