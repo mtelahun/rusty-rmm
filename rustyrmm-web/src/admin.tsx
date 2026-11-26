@@ -184,21 +184,22 @@ function AlertSettings({ environment, saved, failed }: { environment: Environmen
   };
   return (
     <section>
-      <h3>Alerts for {environment.name}</h3>
-      <form class="inline" onSubmit={save}>
-        <label>
-          Offline threshold (minutes){" "}
-          <input
-            inputMode="numeric"
-            required
-            value={threshold}
-            onInput={(e) => {
-              setThreshold(e.currentTarget.value);
-            }}
-          />
-        </label>
-        <button type="submit">Save</button>
-      </form>
+      <div class="toolbar">
+        <h3>Alerts for {environment.name}</h3>
+        <form class="inline" onSubmit={save}>
+          <label>
+            Offline threshold (minutes){" "}
+            <input
+              inputMode="numeric"
+              value={threshold}
+              onInput={(e) => {
+                setThreshold(e.currentTarget.value);
+              }}
+            />
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
       {invalid && (
         <p class="error" role="alert">
           {THRESHOLD_ERROR}
