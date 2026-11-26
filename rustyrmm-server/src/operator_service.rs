@@ -543,6 +543,128 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(MarkAllNotificationsReadResponse {}))
     }
 
+    async fn list_alerts(
+        &self,
+        req: Request<ListAlertsRequest>,
+    ) -> Result<Response<ListAlertsResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let page = Page::new(req.page_size, &req.page_token)?;
+        let environment_id = req
+            .environment_id
+            .as_deref()
+            .map(|s| parse_id(s, "environment_id"))
+            .transpose()?;
+        let opened_after = req
+            .opened_after
+            .map(|t| {
+                DateTime::from_timestamp(t.seconds, t.nanos as u32)
+                    .ok_or_else(|| Status::invalid_argument("opened_after is out of range"))
+            })
+            .transpose()?;
+        // Newest first: ids are UUIDv7, so the token is an upper bound.
+        let rows: Vec<AlertRow> = sqlx::query_as(&format!(
+            "{ALERT_SELECT}
+             WHERE ($1::uuid IS NULL OR a.id < $1)
+               AND ($2::uuid IS NULL OR e.environment_id = $2)
+               AND ($3::smallint IS NULL OR a.severity = $3)
+               AND ($4::timestamptz IS NULL OR a.opened_at >= $4)
+               AND ($5 OR a.resolved_at IS NOT NULL OR {UNSNOOZED})
+               AND ($6 OR a.resolved_at IS NULL)
+               AND ($7 OR {})
+             ORDER BY a.id DESC LIMIT $8",
+            accessible(9)
+        ))
+        .bind(page.after)
+        .bind(environment_id)
+        .bind(req.severity.map(|s| s as i16))
+        .bind(opened_after)
+        .bind(req.include_snoozed)
+        .bind(req.include_resolved)
+        .bind(operator.is_admin)
+        .bind(page.fetch())
+        .bind(operator.id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        let (rows, next_page_token) = page.split(rows, |r| r.0);
+        Ok(Response::new(ListAlertsResponse {
+            alerts: rows.into_iter().map(alert).collect(),
+            next_page_token,
+        }))
+    }
+
+    async fn count_unhandled_alerts(
+        &self,
+        req: Request<CountUnhandledAlertsRequest>,
+    ) -> Result<Response<CountUnhandledAlertsResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM alerts a JOIN endpoints e ON e.id = a.endpoint_id
+             WHERE a.resolved_at IS NULL AND {UNSNOOZED} AND ($1 OR {})",
+            accessible(2)
+        ))
+        .bind(operator.is_admin)
+        .bind(operator.id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(CountUnhandledAlertsResponse {
+            count: count as u32,
+        }))
+    }
+
+    async fn resolve_alert(&self, req: Request<AlertIdRequest>) -> Result<Response<Alert>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let id = parse_id(&req.into_inner().id, "id")?;
+        self.require_open_alert(&operator, id).await?;
+        sqlx::query("UPDATE alerts SET resolved_at = now(), resolved_by_hand = true WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(Response::new(self.get_alert(id).await?))
+    }
+
+    async fn snooze_alert(&self, req: Request<AlertIdRequest>) -> Result<Response<Alert>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let id = parse_id(&req.into_inner().id, "id")?;
+        self.require_open_alert(&operator, id).await?;
+        sqlx::query("UPDATE alerts SET snoozed_until = now() + interval '12 hours' WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(Response::new(self.get_alert(id).await?))
+    }
+
+    async fn add_alert_action(
+        &self,
+        req: Request<AddAlertActionRequest>,
+    ) -> Result<Response<Alert>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let id = parse_id(&req.id, "id")?;
+        let text = req.text.trim();
+        if text.is_empty() || text.chars().count() > 200 || text.contains(['\n', '\r']) {
+            return Err(Status::invalid_argument(
+                "action must be 1 to 200 characters on one line",
+            ));
+        }
+        self.alert_resolved(&operator, id).await?;
+        sqlx::query(
+            "INSERT INTO alert_actions (id, alert_id, operator_id, text) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(id)
+        .bind(operator.id)
+        .bind(text)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(self.get_alert(id).await?))
+    }
+
     async fn delete_endpoint(
         &self,
         req: Request<DeleteEndpointRequest>,
@@ -906,6 +1028,79 @@ fn threshold(minutes: u32) -> Result<i32, Status> {
     }
 }
 
+/// Alert columns with its Endpoint, Environment, latest Inventory and latest action note.
+const ALERT_SELECT: &str = "SELECT a.id, a.endpoint_id, e.hostname, e.environment_id, env.name,
+        (SELECT i.inventory FROM inventories i WHERE i.endpoint_id = e.id
+         ORDER BY i.received_at DESC, i.id DESC LIMIT 1),
+        a.severity, a.last_seen_at, a.opened_at, a.resolved_at, a.snoozed_until,
+        (SELECT x.text FROM alert_actions x WHERE x.alert_id = a.id ORDER BY x.id DESC LIMIT 1)
+     FROM alerts a
+     JOIN endpoints e ON e.id = a.endpoint_id
+     JOIN environments env ON env.id = e.environment_id";
+/// Not snoozed: never, or the snooze has lapsed.
+const UNSNOOZED: &str = "(a.snoozed_until IS NULL OR a.snoozed_until <= now())";
+
+/// The Endpoint's Environment is one of the Operator's, whose id is parameter `$op`.
+fn accessible(op: u8) -> String {
+    format!(
+        "e.environment_id IN (SELECT environment_id FROM environment_members WHERE operator_id = ${op})"
+    )
+}
+
+type AlertRow = (
+    Uuid,
+    Uuid,
+    String,
+    Uuid,
+    String,
+    Option<Vec<u8>>,
+    i16,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    Option<String>,
+);
+
+fn alert(
+    (
+        id,
+        endpoint_id,
+        hostname,
+        environment_id,
+        environment_name,
+        inventory,
+        severity,
+        last_seen_at,
+        opened_at,
+        resolved_at,
+        snoozed_until,
+        last_action,
+    ): AlertRow,
+) -> Alert {
+    Alert {
+        id: id.to_string(),
+        endpoint_id: endpoint_id.to_string(),
+        message: format!(
+            "{hostname} has been offline since {}",
+            last_seen_at.format("%Y-%m-%d %H:%M UTC")
+        ),
+        hostname,
+        environment_id: environment_id.to_string(),
+        environment_name,
+        agent_version: inventory
+            .and_then(|b| Inventory::decode(b.as_slice()).ok())
+            .map(|i| i.agent_version)
+            .unwrap_or_default(),
+        kind: "offline".into(),
+        severity: severity.into(),
+        opened_at: Some(ts(opened_at)),
+        resolved_at: resolved_at.map(ts),
+        snoozed_until: snoozed_until.map(ts),
+        last_action,
+    }
+}
+
 type NotificationRow = (
     Uuid,
     String,
@@ -1097,6 +1292,38 @@ impl OperatorApi {
             Some(env) => self.require_environment(operator, env).await,
             None => Err(no_endpoint()),
         }
+    }
+
+    /// Whether the Alert is resolved; NOT_FOUND when it does not exist or is out of the Operator's reach.
+    async fn alert_resolved(&self, operator: &Operator, id: Uuid) -> Result<bool, Status> {
+        sqlx::query_scalar(&format!(
+            "SELECT a.resolved_at IS NOT NULL FROM alerts a JOIN endpoints e ON e.id = a.endpoint_id
+             WHERE a.id = $1 AND ($2 OR {})",
+            accessible(3)
+        ))
+        .bind(id)
+        .bind(operator.is_admin)
+        .bind(operator.id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| Status::not_found("no such Alert"))
+    }
+
+    async fn require_open_alert(&self, operator: &Operator, id: Uuid) -> Result<(), Status> {
+        match self.alert_resolved(operator, id).await? {
+            true => Err(Status::failed_precondition("the Alert is already resolved")),
+            false => Ok(()),
+        }
+    }
+
+    async fn get_alert(&self, id: Uuid) -> Result<Alert, Status> {
+        let row: AlertRow = sqlx::query_as(&format!("{ALERT_SELECT} WHERE a.id = $1"))
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(alert(row))
     }
 
     /// The Operator's id, once the Environment is known to exist.
@@ -2988,5 +3215,163 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(me.email.as_deref(), Some("new@example.com"));
+    }
+
+    async fn insert_alert(pool: &PgPool, endpoint: Uuid) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO alerts (id, endpoint_id, last_seen_at) VALUES ($1, $2, now())")
+            .bind(id)
+            .bind(endpoint)
+            .execute(pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[sqlx::test]
+    async fn alerts_follow_access_and_can_be_snoozed_resolved_and_annotated(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        for u in ["bob", "carol"] {
+            add_user(&mut client, &admin, u).await;
+        }
+        let (bob, carol) = (
+            login(&mut client, "bob", PASSWORD).await.unwrap(),
+            login(&mut client, "carol", PASSWORD).await.unwrap(),
+        );
+        let ep = env_and_endpoints(&pool, &["h"]).await[0];
+        let env: Uuid = sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO environment_members (environment_id, operator_id) VALUES ($1, $2)",
+        )
+        .bind(env)
+        .bind(operator_id(&pool, "bob").await)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let alert_id = insert_alert(&pool, ep).await;
+        let id = alert_id.to_string();
+        let count = |mut c: OperatorServiceClient<Channel>, token: String| async move {
+            c.count_unhandled_alerts(authed(CountUnhandledAlertsRequest {}, &token))
+                .await
+                .unwrap()
+                .into_inner()
+                .count
+        };
+        let list = |mut c: OperatorServiceClient<Channel>, token: String, snoozed: bool| async move {
+            c.list_alerts(authed(
+                ListAlertsRequest {
+                    include_snoozed: snoozed,
+                    ..Default::default()
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .alerts
+        };
+        let by_id = |token: &str| authed(AlertIdRequest { id: id.clone() }, token);
+        let action = |text: &str, token: &str| {
+            authed(
+                AddAlertActionRequest {
+                    id: id.clone(),
+                    text: text.into(),
+                },
+                token,
+            )
+        };
+
+        // Access: a non-member sees nothing and gets NOT_FOUND; a member or Admin sees it.
+        assert_eq!(count(client.clone(), carol.clone()).await, 0);
+        assert!(list(client.clone(), carol.clone(), true).await.is_empty());
+        assert_eq!(
+            code(client.resolve_alert(by_id(&carol)).await),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            code(client.snooze_alert(by_id(&carol)).await),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            code(client.add_alert_action(action("x", &carol)).await),
+            tonic::Code::NotFound
+        );
+        for token in [&bob, &admin] {
+            assert_eq!(count(client.clone(), token.clone()).await, 1);
+        }
+        let a = list(client.clone(), bob.clone(), false).await.remove(0);
+        assert_eq!(
+            (a.environment_name.as_str(), a.severity, a.kind.as_str()),
+            ("lab", AlertSeverity::Warning as i32, "offline")
+        );
+        assert!(a.message.starts_with("h has been offline since"));
+
+        // Notes: validated, trimmed; the latest is the last action.
+        for bad in ["", "  ", "a\nb", &"x".repeat(201)] {
+            assert_eq!(
+                code(client.add_alert_action(action(bad, &bob)).await),
+                tonic::Code::InvalidArgument
+            );
+        }
+        client
+            .add_alert_action(action(" first ", &bob))
+            .await
+            .unwrap();
+        let a = client
+            .add_alert_action(action(&"x".repeat(200), &admin))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(a.last_action, Some("x".repeat(200)));
+
+        // Snoozed: out of the count and default list until it lapses.
+        let a = client.snooze_alert(by_id(&bob)).await.unwrap().into_inner();
+        assert!(a.snoozed_until.is_some());
+        assert_eq!(count(client.clone(), bob.clone()).await, 0);
+        assert!(list(client.clone(), bob.clone(), false).await.is_empty());
+        assert_eq!(list(client.clone(), bob.clone(), true).await.len(), 1);
+        sqlx::query("UPDATE alerts SET snoozed_until = now() - interval '1 second'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count(client.clone(), bob.clone()).await, 1);
+        assert_eq!(list(client.clone(), bob.clone(), false).await.len(), 1);
+
+        // Resolved by hand: gone from the count; notes still allowed; no second resolve or snooze.
+        let a = client
+            .resolve_alert(by_id(&bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(a.resolved_at.is_some());
+        assert_eq!(count(client.clone(), bob.clone()).await, 0);
+        assert!(list(client.clone(), bob.clone(), true).await.is_empty());
+        assert_eq!(
+            code(client.resolve_alert(by_id(&bob)).await),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            code(client.snooze_alert(by_id(&bob)).await),
+            tonic::Code::FailedPrecondition
+        );
+        client.add_alert_action(action("done", &bob)).await.unwrap();
+        let resolved = client
+            .list_alerts(authed(
+                ListAlertsRequest {
+                    include_resolved: true,
+                    ..Default::default()
+                },
+                &bob,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .alerts;
+        assert_eq!(resolved[0].last_action.as_deref(), Some("done"));
     }
 }
