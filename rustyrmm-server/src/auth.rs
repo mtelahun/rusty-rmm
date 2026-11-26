@@ -36,6 +36,7 @@ pub struct Operator {
     pub id: Uuid,
     pub username: String,
     pub is_admin: bool,
+    pub email: Option<String>,
     pub token_hash: Vec<u8>,
 }
 
@@ -99,20 +100,21 @@ pub async fn authenticate<T>(pool: &PgPool, req: &Request<T>) -> Result<Operator
         })
         .ok_or_else(|| Status::unauthenticated("log in first"))?;
     let token_hash = hash_secret(&token);
-    let row: Option<(Uuid, String, bool)> = sqlx::query_as(
-        "SELECT o.id, o.username, o.is_admin FROM operator_sessions s JOIN operators o ON o.id = s.operator_id
+    let row: Option<(Uuid, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT o.id, o.username, o.is_admin, o.email FROM operator_sessions s JOIN operators o ON o.id = s.operator_id
          WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()",
     )
     .bind(&token_hash)
     .fetch_optional(pool)
     .await
     .map_err(internal)?;
-    let (id, username, is_admin) =
+    let (id, username, is_admin, email) =
         row.ok_or_else(|| Status::unauthenticated("session expired or logged out"))?;
     Ok(Operator {
         id,
         username,
         is_admin,
+        email,
         token_hash,
     })
 }

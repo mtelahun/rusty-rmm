@@ -17,7 +17,7 @@ The central RustyRMM management service that Agents connect to.
 _Avoid_: Backend, master
 
 **Operator**:
-A human who uses the Server to observe and act on Endpoints. Belongs to the Administrator group or not, and to zero or more Environments.
+A human who uses the Server to observe and act on Endpoints. Has an email address (so the Server can email Notifications). Belongs to the Administrator group or not, and to zero or more Environments.
 _Avoid_: User, admin
 
 **Administrator group (Admin group)**:
@@ -25,7 +25,7 @@ The built-in group of Operators who access every Environment and manage Operator
 _Avoid_: Root, superuser
 
 **Environment**:
-A named group of Endpoints, such as a customer or site, on a single Server. An access boundary: Administrators access every Environment; other Operators only the ones they belong to.
+A named group of Endpoints, such as a customer or site, on a single Server. An access boundary: Administrators access every Environment; other Operators only the ones they belong to. May have an optional free-text owner (the customer or site it belongs to), which is a label only and is visible and editable only to those who can access the Environment.
 _Avoid_: Tenant, organization, group
 
 **Pairing**:

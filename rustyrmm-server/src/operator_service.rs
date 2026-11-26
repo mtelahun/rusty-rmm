@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::auth::{self, authenticate, internal, Operator};
 use crate::commands::{self, DispatchError, NewCommand};
-use crate::operators::{self, AddOperatorError, SetAdminError};
+use crate::operators::{self, AddOperatorError, SetAdminError, SetEmailError};
 use crate::pairing;
 use crate::sessions::{LiveError, Sessions};
 
@@ -76,14 +76,21 @@ impl OperatorService for OperatorApi {
         req: Request<AddOperatorRequest>,
     ) -> Result<Response<AddOperatorResponse>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
-        let AddOperatorRequest { username, password } = req.into_inner();
-        let id = operators::add_operator(&self.pool, &username, &password)
+        let AddOperatorRequest {
+            username,
+            password,
+            email,
+        } = req.into_inner();
+        let id = operators::add_operator(&self.pool, &username, &password, &email)
             .await
             .map_err(|e| match e {
-                AddOperatorError::UsernameTaken(_) => Status::already_exists(e.to_string()),
-                AddOperatorError::InvalidUsername | AddOperatorError::PasswordTooShort => {
-                    Status::invalid_argument(e.to_string())
+                AddOperatorError::UsernameTaken(_) | AddOperatorError::EmailTaken(_) => {
+                    Status::already_exists(e.to_string())
                 }
+                AddOperatorError::InvalidUsername
+                | AddOperatorError::PasswordTooShort
+                | AddOperatorError::EmptyEmail
+                | AddOperatorError::InvalidEmail => Status::invalid_argument(e.to_string()),
                 e => internal(e),
             })?;
         Ok(Response::new(AddOperatorResponse {
@@ -96,19 +103,21 @@ impl OperatorService for OperatorApi {
         req: Request<CreateEnvironmentRequest>,
     ) -> Result<Response<Environment>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
-        let name = req.into_inner().name.trim().to_owned();
+        let req = req.into_inner();
+        let name = req.name.trim().to_owned();
+        let owner = normalise_owner(&req.owner)?;
         if name.is_empty() {
             return Err(Status::invalid_argument(
                 "Environment name must not be empty",
             ));
         }
         let id = Uuid::now_v7();
-        let (created_at, offline_threshold_minutes): (DateTime<Utc>, i32) = sqlx::query_as(
-            "INSERT INTO environments (id, name) VALUES ($1, $2)
-             RETURNING created_at, offline_threshold_minutes",
+        let created_at: DateTime<Utc> = sqlx::query_scalar(
+            "INSERT INTO environments (id, name, owner) VALUES ($1, $2, $3) RETURNING created_at",
         )
         .bind(id)
         .bind(&name)
+        .bind(&owner)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| match e {
@@ -121,8 +130,35 @@ impl OperatorService for OperatorApi {
             id: id.to_string(),
             name,
             created_at: Some(ts(created_at)),
-            offline_threshold_minutes: offline_threshold_minutes as u32,
-            alert_recipients: Vec::new(),
+            owner: owner.unwrap_or_default(),
+        }))
+    }
+
+    async fn update_environment(
+        &self,
+        req: Request<UpdateEnvironmentRequest>,
+    ) -> Result<Response<Environment>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let id = parse_id(&req.id, "id")?;
+        let owner = normalise_owner(&req.owner)?;
+        self.require_environment(&operator, id).await?;
+        let (id, name, created_at, owner): (Uuid, String, DateTime<Utc>, Option<String>) =
+            sqlx::query_as(
+                "UPDATE environments SET owner = $2 WHERE id = $1
+                 RETURNING id, name, created_at, owner",
+            )
+            .bind(id)
+            .bind(owner)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| Status::not_found("no such Environment"))?;
+        Ok(Response::new(Environment {
+            id: id.to_string(),
+            name,
+            created_at: Some(ts(created_at)),
+            owner: owner.unwrap_or_default(),
         }))
     }
 
@@ -194,12 +230,12 @@ impl OperatorService for OperatorApi {
         let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let page = Page::new(req.page_size, &req.page_token)?;
-        let rows: Vec<EnvironmentRow> = sqlx::query_as(&format!(
-            "{ENVIRONMENT_SELECT}
-             WHERE ($1::uuid IS NULL OR e.id > $1)
-               AND ($3 OR e.id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
-             ORDER BY e.id LIMIT $2"
-        ))
+        let rows: Vec<(Uuid, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
+            "SELECT id, name, created_at, owner FROM environments
+             WHERE ($1::uuid IS NULL OR id > $1)
+               AND ($3 OR id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
+             ORDER BY id LIMIT $2",
+        )
         .bind(page.after)
         .bind(page.fetch())
         .bind(operator.is_admin)
@@ -209,7 +245,15 @@ impl OperatorService for OperatorApi {
         .map_err(internal)?;
         let (rows, next_page_token) = page.split(rows, |r| r.0);
         Ok(Response::new(ListEnvironmentsResponse {
-            environments: rows.into_iter().map(environment).collect(),
+            environments: rows
+                .into_iter()
+                .map(|(id, name, created_at, owner)| Environment {
+                    id: id.to_string(),
+                    name,
+                    created_at: Some(ts(created_at)),
+                    owner: owner.unwrap_or_default(),
+                })
+                .collect(),
             next_page_token,
         }))
     }
@@ -712,7 +756,30 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(WhoAmIResponse {
             username: operator.username,
             is_admin: operator.is_admin,
+            email: operator.email,
         }))
+    }
+
+    async fn set_operator_email(
+        &self,
+        req: Request<SetOperatorEmailRequest>,
+    ) -> Result<Response<SetOperatorEmailResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let SetOperatorEmailRequest { username, email } = req.into_inner();
+        if !operator.is_admin && operator.username != username {
+            return Err(Status::permission_denied(
+                "only Admins may change another Operator's email address",
+            ));
+        }
+        operators::set_email(&self.pool, &username, &email)
+            .await
+            .map_err(|e| match e {
+                SetEmailError::Invalid(_) => Status::invalid_argument(e.to_string()),
+                SetEmailError::EmailTaken(_) => Status::already_exists(e.to_string()),
+                SetEmailError::NoSuchOperator(_) => Status::not_found(e.to_string()),
+                e => internal(e),
+            })?;
+        Ok(Response::new(SetOperatorEmailResponse {}))
     }
 
     async fn list_operators(
@@ -721,8 +788,8 @@ impl OperatorService for OperatorApi {
     ) -> Result<Response<ListOperatorsResponse>, Status> {
         require_admin(&authenticate(&self.pool, &req).await?)?;
         // Not paged: there are few Operators.
-        let rows: Vec<(String, bool, Vec<Uuid>)> = sqlx::query_as(
-            "SELECT o.username, o.is_admin,
+        let rows: Vec<(String, bool, Option<String>, Vec<Uuid>)> = sqlx::query_as(
+            "SELECT o.username, o.is_admin, o.email,
                     coalesce(array_agg(m.environment_id ORDER BY m.environment_id)
                              FILTER (WHERE m.environment_id IS NOT NULL), '{}')
              FROM operators o LEFT JOIN environment_members m ON m.operator_id = o.id
@@ -734,9 +801,10 @@ impl OperatorService for OperatorApi {
         Ok(Response::new(ListOperatorsResponse {
             operators: rows
                 .into_iter()
-                .map(|(username, is_admin, ids)| OperatorInfo {
+                .map(|(username, is_admin, email, ids)| OperatorInfo {
                     username,
                     is_admin,
+                    email,
                     environment_ids: ids.iter().map(Uuid::to_string).collect(),
                 })
                 .collect(),
@@ -1152,6 +1220,22 @@ impl Page {
     }
 }
 
+/// Trims an owner label; empty means none. Rejects over 200 chars or control characters.
+fn normalise_owner(owner: &str) -> Result<Option<String>, Status> {
+    let owner = owner.trim();
+    if owner.chars().count() > 200 {
+        return Err(Status::invalid_argument(
+            "owner must be at most 200 characters",
+        ));
+    }
+    if owner.chars().any(char::is_control) {
+        return Err(Status::invalid_argument(
+            "owner must not contain control characters",
+        ));
+    }
+    Ok((!owner.is_empty()).then(|| owner.to_owned()))
+}
+
 fn parse_id(s: &str, field: &str) -> Result<Uuid, Status> {
     s.parse()
         .map_err(|_| Status::invalid_argument(format!("{field} is not a valid id")))
@@ -1239,7 +1323,7 @@ mod tests {
             tls_config(&cert.pem(), &key.serialize_pem()),
             listener,
         ));
-        operators::add_operator(&pool, "admin", PASSWORD)
+        operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
             .await
             .unwrap();
         let channel = Channel::from_shared(format!("https://{addr}"))
@@ -1285,7 +1369,10 @@ mod tests {
         for name in ["a", "b", "c"] {
             client
                 .create_environment(authed(
-                    CreateEnvironmentRequest { name: name.into() },
+                    CreateEnvironmentRequest {
+                        name: name.into(),
+                        owner: String::new(),
+                    },
                     &token,
                 ))
                 .await
@@ -1293,7 +1380,10 @@ mod tests {
         }
         let dup = client
             .create_environment(authed(
-                CreateEnvironmentRequest { name: "a".into() },
+                CreateEnvironmentRequest {
+                    name: "a".into(),
+                    owner: String::new(),
+                },
                 &token,
             ))
             .await
@@ -1393,6 +1483,136 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn environment_owner_is_created_updated_cleared_and_validated(pool: PgPool) {
+        let (mut client, _pool) = start(pool).await;
+        let token = login(&mut client, "admin", PASSWORD).await.unwrap();
+
+        let create = |name: &str, owner: &str| {
+            authed(
+                CreateEnvironmentRequest {
+                    name: name.into(),
+                    owner: owner.into(),
+                },
+                &token,
+            )
+        };
+        let update = |id: &str, owner: &str| {
+            authed(
+                UpdateEnvironmentRequest {
+                    id: id.into(),
+                    owner: owner.into(),
+                },
+                &token,
+            )
+        };
+
+        let acme = client
+            .create_environment(create("acme", "  Acme Corp  "))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(acme.owner, "Acme Corp");
+        let bare = client
+            .create_environment(create("bare", ""))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(bare.owner, "");
+
+        let owners = |client: &mut OperatorServiceClient<_>| {
+            let mut client = client.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .list_environments(authed(ListEnvironmentsRequest::default(), &token))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .environments
+                    .into_iter()
+                    .map(|e| (e.name, e.owner))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            owners(&mut client).await,
+            [
+                ("acme".into(), "Acme Corp".into()),
+                ("bare".into(), "".into())
+            ]
+        );
+
+        let set = client
+            .update_environment(update(&bare.id, "Beta"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!((set.owner.as_str(), set.name.as_str()), ("Beta", "bare"));
+        assert_eq!(owners(&mut client).await[1].1, "Beta");
+
+        for blank in ["", "   "] {
+            let cleared = client
+                .update_environment(update(&bare.id, blank))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(cleared.owner, "");
+        }
+        assert_eq!(owners(&mut client).await[1].1, "");
+
+        let long = "x".repeat(201);
+        let ok = "x".repeat(200);
+        let too_long = client
+            .create_environment(create("long", &long))
+            .await
+            .unwrap_err();
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        let too_long = client
+            .update_environment(update(&bare.id, &long))
+            .await
+            .unwrap_err();
+        assert_eq!(too_long.code(), tonic::Code::InvalidArgument);
+        client.create_environment(create("max", &ok)).await.unwrap();
+        client
+            .update_environment(update(&bare.id, &ok))
+            .await
+            .unwrap();
+
+        for bad in ["a\nb", "a\x1bb"] {
+            let e = client
+                .update_environment(update(&bare.id, bad))
+                .await
+                .unwrap_err();
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            let e = client
+                .create_environment(create("ctl", bad))
+                .await
+                .unwrap_err();
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+        }
+
+        let missing = client
+            .update_environment(update(&Uuid::now_v7().to_string(), "x"))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+        let malformed = client
+            .update_environment(update("nope", "x"))
+            .await
+            .unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+
+        let anon = client
+            .update_environment(UpdateEnvironmentRequest {
+                id: bare.id,
+                owner: "x".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(anon.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[sqlx::test]
     async fn sessions_are_required_checked_and_end_at_logout(pool: PgPool) {
         let (mut client, pool) = start(pool).await;
 
@@ -1417,6 +1637,7 @@ mod tests {
                 AddOperatorRequest {
                     username: "bob".into(),
                     password: PASSWORD.into(),
+                    email: "bob@example.com".into(),
                 },
                 &token,
             ))
@@ -1450,7 +1671,7 @@ mod tests {
 
     #[sqlx::test]
     async fn browser_cookie_is_set_on_grpc_web_login_and_only_counts_on_grpc_web(pool: PgPool) {
-        operators::add_operator(&pool, "admin", PASSWORD)
+        operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
             .await
             .unwrap();
         let api = OperatorApi {
@@ -1909,6 +2130,7 @@ mod tests {
                 AddOperatorRequest {
                     username: name.into(),
                     password: PASSWORD.into(),
+                    email: format!("{name}@example.com"),
                 },
                 admin,
             ))
@@ -2126,6 +2348,62 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn environment_owner_follows_membership(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        add_user(&mut client, &admin, "bob").await;
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let env = Uuid::now_v7();
+        sqlx::query("INSERT INTO environments (id, name, owner) VALUES ($1, 'lab', 'Acme')")
+            .bind(env)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let update = |token: &str| {
+            authed(
+                UpdateEnvironmentRequest {
+                    id: env.to_string(),
+                    owner: "Beta".into(),
+                },
+                token,
+            )
+        };
+
+        // A non-member neither sees nor sets the owner.
+        let envs = client
+            .list_environments(authed(ListEnvironmentsRequest::default(), &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(envs.environments.is_empty());
+        let e = client.update_environment(update(&bob)).await.unwrap_err();
+        assert_eq!(e.code(), tonic::Code::PermissionDenied);
+
+        client
+            .add_environment_member(authed(
+                EnvironmentMemberRequest {
+                    environment_id: env.to_string(),
+                    username: "bob".into(),
+                },
+                &admin,
+            ))
+            .await
+            .unwrap();
+        let set = client
+            .update_environment(update(&bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(set.owner, "Beta");
+        let envs = client
+            .list_environments(authed(ListEnvironmentsRequest::default(), &bob))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(envs.environments[0].owner, "Beta");
+    }
+
+    #[sqlx::test]
     async fn environments_are_an_access_boundary(pool: PgPool) {
         let (mut client, pool) = start(pool).await;
         let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
@@ -2159,7 +2437,8 @@ mod tests {
                     .add_operator(authed(
                         AddOperatorRequest {
                             username: "eve".into(),
-                            password: PASSWORD.into()
+                            password: PASSWORD.into(),
+                            email: "eve@example.com".into()
                         },
                         &bob
                     ))
@@ -2170,7 +2449,13 @@ mod tests {
         assert_eq!(
             code(
                 client
-                    .create_environment(authed(CreateEnvironmentRequest { name: "x".into() }, &bob))
+                    .create_environment(authed(
+                        CreateEnvironmentRequest {
+                            name: "x".into(),
+                            owner: String::new()
+                        },
+                        &bob
+                    ))
                     .await
             ),
             tonic::Code::PermissionDenied
@@ -2309,281 +2594,119 @@ mod tests {
         );
     }
 
-    async fn operator_id(pool: &PgPool, name: &str) -> Uuid {
-        sqlx::query_scalar("SELECT id FROM operators WHERE username = $1")
-            .bind(name)
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
     #[sqlx::test]
-    async fn alert_settings_are_validated_and_access_controlled(pool: PgPool) {
-        let (mut client, pool) = start(pool).await;
-        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
-        for u in ["bob", "carol"] {
-            add_user(&mut client, &admin, u).await;
-        }
-        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
-        let carol = login(&mut client, "carol", PASSWORD).await.unwrap();
-        let ep = env_and_endpoints(&pool, &["h"]).await[0];
-        let env: Uuid = sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
-            .bind(ep)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        client
-            .add_environment_member(authed(
-                EnvironmentMemberRequest {
-                    environment_id: env.to_string(),
-                    username: "bob".into(),
-                },
-                &admin,
-            ))
-            .await
-            .unwrap();
-        let env_settings = |token: &str, minutes: u32, who: &[&str]| {
-            authed(
-                SetEnvironmentAlertSettingsRequest {
-                    environment_id: env.to_string(),
-                    offline_threshold_minutes: minutes,
-                    alert_recipients: who.iter().map(|s| s.to_string()).collect(),
-                },
-                token,
-            )
-        };
-
-        // Thresholds: 5 and 43200 minutes are the limits.
-        for minutes in [4, 43_201] {
-            assert_eq!(
-                code(
-                    client
-                        .set_environment_alert_settings(env_settings(&admin, minutes, &[]))
-                        .await
-                ),
-                tonic::Code::InvalidArgument
-            );
-        }
-        for minutes in [5, 43_200] {
-            client
-                .set_environment_alert_settings(env_settings(&admin, minutes, &[]))
-                .await
-                .unwrap();
-        }
-        // Only Admins; recipients must be known and have access.
-        assert_eq!(
-            code(
-                client
-                    .set_environment_alert_settings(env_settings(&bob, 15, &[]))
-                    .await
-            ),
-            tonic::Code::PermissionDenied
-        );
-        assert_eq!(
-            code(
-                client
-                    .set_environment_alert_settings(env_settings(&admin, 15, &["carol"]))
-                    .await
-            ),
-            tonic::Code::InvalidArgument
-        );
-        assert_eq!(
-            code(
-                client
-                    .set_environment_alert_settings(env_settings(&admin, 15, &["nobody"]))
-                    .await
-            ),
-            tonic::Code::NotFound
-        );
-        let set = client
-            .set_environment_alert_settings(env_settings(&admin, 20, &["bob", "admin"]))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(
-            (set.offline_threshold_minutes, set.alert_recipients),
-            (20, vec!["admin".to_string(), "bob".to_string()])
-        );
-        // A failed replace leaves the list untouched.
-        client
-            .set_environment_alert_settings(env_settings(&admin, 15, &["bob", "carol"]))
-            .await
-            .unwrap_err();
-        let listed = client
-            .list_environments(authed(ListEnvironmentsRequest::default(), &admin))
-            .await
-            .unwrap()
-            .into_inner()
-            .environments;
-        assert_eq!(listed[0].alert_recipients.len(), 2);
-        assert_eq!(listed[0].offline_threshold_minutes, 20);
-
-        // Endpoints: any Operator with access, not others.
-        let ep_settings = |token: &str, enabled: bool, minutes: Option<u32>| {
-            authed(
-                SetEndpointAlertSettingsRequest {
-                    endpoint_id: ep.to_string(),
-                    alerts_enabled: enabled,
-                    offline_threshold_minutes: minutes,
-                },
-                token,
-            )
-        };
-        assert_eq!(
-            code(
-                client
-                    .set_endpoint_alert_settings(ep_settings(&carol, true, None))
-                    .await
-            ),
-            tonic::Code::PermissionDenied
-        );
-        for minutes in [4, 43_201] {
-            assert_eq!(
-                code(
-                    client
-                        .set_endpoint_alert_settings(ep_settings(&bob, true, Some(minutes)))
-                        .await
-                ),
-                tonic::Code::InvalidArgument
-            );
-        }
-        let e = client
-            .set_endpoint_alert_settings(ep_settings(&bob, false, Some(5)))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(
-            (e.alerts_enabled, e.offline_threshold_minutes, e.alert_open),
-            (false, Some(5), false)
-        );
-        let e = client
-            .set_endpoint_alert_settings(ep_settings(&bob, true, None))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(
-            (e.alerts_enabled, e.offline_threshold_minutes),
-            (true, None)
-        );
-    }
-
-    #[sqlx::test]
-    async fn notifications_are_per_operator_newest_first_and_follow_access(pool: PgPool) {
+    async fn operator_emails(pool: PgPool) {
         let (mut client, pool) = start(pool).await;
         let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
         add_user(&mut client, &admin, "bob").await;
+        add_user(&mut client, &admin, "carol").await;
         let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
-        let ep = env_and_endpoints(&pool, &["h"]).await[0];
-        let env: Uuid = sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
-            .bind(ep)
-            .fetch_one(&pool)
+        let set = |name: &str, email: &str| SetOperatorEmailRequest {
+            username: name.into(),
+            email: email.into(),
+        };
+        let email_of = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT email FROM operators WHERE username = $1",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // Add Operator validates the address.
+        let add = |email: &str| AddOperatorRequest {
+            username: "dave".into(),
+            password: PASSWORD.into(),
+            email: email.into(),
+        };
+        let err = client
+            .add_operator(authed(add("a@b"), &admin))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("email"));
+        assert_eq!(
+            code(
+                client
+                    .add_operator(authed(add("Bob@EXAMPLE.com"), &admin))
+                    .await
+            ),
+            tonic::Code::AlreadyExists
+        );
+
+        // Own address: allowed; someone else's: denied and unchanged.
+        client
+            .set_operator_email(authed(set("bob", "new@example.com"), &bob))
             .await
             .unwrap();
-        let (admin_id, bob_id) = (
-            operator_id(&pool, "admin").await,
-            operator_id(&pool, "bob").await,
+        assert_eq!(email_of("bob").await.as_deref(), Some("new@example.com"));
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("carol", "x@example.com"), &bob))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
         );
-        sqlx::query(
-            "INSERT INTO environment_members (environment_id, operator_id) VALUES ($1, $2)",
-        )
-        .bind(env)
-        .bind(bob_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let mut ids = Vec::new();
-        for (owner, kind) in [(bob_id, 1), (admin_id, 1), (bob_id, 2)] {
-            let id = Uuid::now_v7();
-            sqlx::query(
-                "INSERT INTO notifications (id, operator_id, environment_id, hostname, kind,
-                                            last_seen_at, offline_seconds)
-                 VALUES ($1, $2, $3, 'h', $4, now(), CASE WHEN $4 = 2 THEN 90 END)",
-            )
-            .bind(id)
-            .bind(owner)
-            .bind(env)
-            .bind(kind as i16)
+        assert_eq!(
+            email_of("carol").await.as_deref(),
+            Some("carol@example.com")
+        );
+
+        // An Admin may change anyone's; unknown names are NOT_FOUND.
+        client
+            .set_operator_email(authed(set("carol", "c2@example.com"), &admin))
+            .await
+            .unwrap();
+        assert_eq!(email_of("carol").await.as_deref(), Some("c2@example.com"));
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("nobody", "x@example.com"), &admin))
+                    .await
+            ),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            code(
+                client
+                    .set_operator_email(authed(set("carol", "NEW@example.com"), &admin))
+                    .await
+            ),
+            tonic::Code::AlreadyExists
+        );
+
+        // Lists and WhoAmI show emails; a null one is unset.
+        sqlx::query("UPDATE operators SET email = NULL WHERE username = 'admin'")
             .execute(&pool)
             .await
             .unwrap();
-            ids.push(id);
-        }
-        let list = |mut c: OperatorServiceClient<Channel>, token: String| async move {
-            c.list_notifications(authed(ListNotificationsRequest::default(), &token))
-                .await
-                .unwrap()
-                .into_inner()
-                .notifications
-        };
-
-        let mine = list(client.clone(), bob.clone()).await;
-        assert_eq!(
-            mine.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
-            vec![ids[2].to_string(), ids[0].to_string()]
-        );
-        assert_eq!(
-            mine[0].offline_duration.as_ref().map(|d| d.seconds),
-            Some(90)
-        );
-        assert_eq!(mine[1].offline_duration, None);
-        assert!(mine[0].read_at.is_none());
-
-        // Marking is limited to the caller's own Notifications.
-        let mark = |id: Uuid, token: &str| {
-            authed(MarkNotificationReadRequest { id: id.to_string() }, token)
-        };
-        assert_eq!(
-            code(client.mark_notification_read(mark(ids[1], &bob)).await),
-            tonic::Code::NotFound
-        );
-        client
-            .mark_notification_read(mark(ids[0], &bob))
+        let ops = client
+            .list_operators(authed(ListOperatorsRequest {}, &admin))
             .await
-            .unwrap();
-        assert!(list(client.clone(), bob.clone()).await[1].read_at.is_some());
-        client
-            .mark_all_notifications_read(authed(MarkAllNotificationsReadRequest {}, &bob))
-            .await
-            .unwrap();
-        assert!(list(client.clone(), bob.clone())
-            .await
-            .iter()
-            .all(|n| n.read_at.is_some()));
-        assert!(list(client.clone(), admin.clone()).await[0]
-            .read_at
-            .is_none());
-
-        // Paging, then losing access to the Environment hides them, but keeps the rows.
-        let page = client
-            .list_notifications(authed(
-                ListNotificationsRequest {
-                    page_size: 1,
-                    page_token: String::new(),
-                },
-                &bob,
-            ))
+            .unwrap()
+            .into_inner()
+            .operators;
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.username.as_str(), o.email.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("admin", None),
+                ("bob", Some("new@example.com")),
+                ("carol", Some("c2@example.com"))
+            ]
+        );
+        let me = client
+            .who_am_i(authed(WhoAmIRequest {}, &bob))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(
-            (page.notifications.len(), page.next_page_token.is_empty()),
-            (1, false)
-        );
-        sqlx::query("DELETE FROM environment_members WHERE operator_id = $1")
-            .bind(bob_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(list(client.clone(), bob.clone()).await.is_empty());
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM notifications WHERE operator_id = $1"
-            )
-            .bind(bob_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-            2
-        );
+        assert_eq!(me.email.as_deref(), Some("new@example.com"));
     }
 }

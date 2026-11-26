@@ -102,7 +102,7 @@ async fn start(pool: PgPool) -> Rig {
         operator_service::tls_config(&cert.pem(), &key.serialize_pem()),
         operator_listener,
     ));
-    operators::add_operator(&pool, "admin", PASSWORD)
+    operators::add_operator(&pool, "admin", PASSWORD, "admin@example.com")
         .await
         .unwrap();
     Rig {
@@ -155,7 +155,9 @@ async fn operator_pairs_an_agent_and_runs_a_command(pool: PgPool) {
 
     let r = rig.clone();
     let token = blocking(move || {
-        r.json(&["env", "create", "lab"]);
+        r.json(&["env", "create", "lab", "--owner", "Acme"]);
+        let set = r.json(&["env", "set-owner", "lab", "Beta"]);
+        assert_eq!(set["owner"], "Beta");
         r.json(&["pairing-token", "create", "lab", "--expires", "1h"])
     })
     .await;
