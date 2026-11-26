@@ -51,6 +51,22 @@ $EDITOR /etc/rustyrmm/server.env   # set DATABASE_URL (password from step 3) and
 
 `RUSTYRMM_HOSTNAME` becomes `--agent-name`: the name Agents dial. Pairing one-liners carry `RUSTYRMM_HOSTNAME:7443`.
 
+### Email Notifications (optional)
+
+Alert emails are off unless the Server knows an SMTP server. Set these in `/etc/rustyrmm/server.env`; the unit's `ExecStart` needs no change, because `serve` reads each flag from its environment variable.
+
+| Flag | Environment variable | Meaning |
+| --- | --- | --- |
+| `--smtp-host` | `RUSTYRMM_SMTP_HOST` | SMTP server (email is on when this and `--smtp-from` are set) |
+| `--smtp-port` | `RUSTYRMM_SMTP_PORT` | Default 25 for `none`, 587 for `starttls`, 465 for `tls` |
+| `--smtp-tls` | `RUSTYRMM_SMTP_TLS` | `none`, `starttls` (default) or `tls` |
+| `--smtp-username` | `RUSTYRMM_SMTP_USERNAME` | Optional |
+| (no flag) | `RUSTYRMM_SMTP_PASSWORD` | Optional; only the environment, so it stays out of `ps` |
+| `--smtp-from` | `RUSTYRMM_SMTP_FROM` | Sender, e.g. `RustyRMM <rmm@example.com>` |
+| `--public-url` | `RUSTYRMM_PUBLIC_URL` | Web UI base URL for links in emails, e.g. `https://rmm.example.com`; required when email is on |
+
+The Server refuses to start if email is on and `--public-url` is missing or `--smtp-from` is not a valid mailbox. An Operator needs an email address to receive email. A failed send is retried after 1, 5 and 25 minutes, then dropped with a line in the journal.
+
 ## 5. Certificate (certbot)
 
 certbot runs standalone on port 80. The deploy hook copies the certificate and key to `/etc/rustyrmm/` (owner `rustyrmm`, 0600) and restarts the Server. It runs on issue and on every renewal. The Server reads the certificate only at startup, so the restart is required; Agents reconnect with backoff.

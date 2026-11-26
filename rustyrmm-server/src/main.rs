@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
-use rustyrmm_server::{agent_service, ca, db, jobs, operator_service, operators, sessions};
+use rustyrmm_server::{agent_service, ca, db, email, jobs, operator_service, operators, sessions};
 
 #[derive(Parser)]
 #[command(version, about = "RustyRMM Server")]
@@ -58,6 +58,11 @@ enum Command {
         /// Days to keep 5-minute Sample rollups.
         #[arg(long, default_value_t = 90)]
         rollup_retention_days: u64,
+        /// Base URL of the web UI (e.g. https://rmm.example.com:8443), for links in emails.
+        #[arg(long, env = "RUSTYRMM_PUBLIC_URL")]
+        public_url: Option<String>,
+        #[command(flatten)]
+        smtp: Box<email::SmtpArgs>,
     },
     /// Manage Operators (run on the Server host).
     Operator {
@@ -93,7 +98,10 @@ async fn main() -> anyhow::Result<()> {
             inventory_secs,
             sample_retention_days,
             rollup_retention_days,
+            public_url,
+            smtp,
         } => {
+            let smtp = (*smtp).resolve(public_url.as_deref())?;
             const DAY: u64 = 86_400;
             let retention = jobs::Retention {
                 raw_samples: Duration::from_secs(sample_retention_days * DAY),
@@ -107,6 +115,10 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             };
             let pool = db::connect(&database_url).await?;
+            let email_enabled = smtp.is_some();
+            if let Some(smtp) = smtp {
+                tokio::spawn(email::run(pool.clone(), smtp));
+            }
             let ca = Arc::new(ca::Ca::load_or_create(&state_dir)?);
             let sessions = Arc::new(sessions::Sessions::default());
             tokio::spawn(jobs::run(
@@ -114,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
                 retention,
                 sessions.clone(),
                 chrono::Utc::now(),
+                public_url.filter(|_| email_enabled),
             ));
             println!(
                 "Agent CA fingerprint (SHA-256): {}",
@@ -124,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 sessions: sessions.clone(),
                 agent_address: format!("{}:{}", agent_names[0], agent_listen.port()),
                 ca_fingerprint: ca.fingerprint_sha256(),
+                email_enabled,
             };
             let operator_tls = operator_service::tls_config(
                 &std::fs::read_to_string(&operator_cert)?,

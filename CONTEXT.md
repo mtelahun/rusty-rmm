@@ -57,7 +57,7 @@ An Endpoint's offline condition: opened when it has been Offline past its thresh
 _Avoid_: Incident, alarm
 
 **Notification**:
-A message to one Operator through one channel (in the web UI for now) about an Alert opening or resolving. Operators in the Environment's recipient list who can access it each get their own.
+A message to one Operator through one channel (the web UI, email, or both, chosen per recipient) about an Alert opening or resolving. Operators in the Environment's recipient list who can access it each get their own; email batches one check's changes in an Environment into a single digest.
 _Avoid_: Alert (that is the condition, not the message)
 
 **Revoked**:
