@@ -13,6 +13,8 @@ const POLL: Duration = Duration::from_secs(15);
 const BATCH: i64 = 20;
 /// Total tries per email: now, then 1, 5 and 25 minutes after each failure.
 const MAX_ATTEMPTS: i32 = 4;
+/// How long a claimed row stays hidden; longer than `BATCH` sends at the 30 s SMTP timeout.
+const LEASE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum Tls {
@@ -203,11 +205,23 @@ where
     .bind(BATCH)
     .fetch_all(&mut *tx)
     .await?;
+    let ids: Vec<Uuid> = due.iter().map(|row| row.0).collect();
+    sqlx::query(
+        "UPDATE email_outbox SET next_attempt_at = now() + make_interval(secs => $2)
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(LEASE.as_secs_f64())
+    .execute(&mut *tx)
+    .await?;
+    // Sends run with no transaction open, and each outcome is recorded right away, so a
+    // later failure can't undo the record of an email SMTP already accepted.
+    tx.commit().await?;
     for (id, operator_id, address, subject, body, attempts) in due {
         let Some(address) = address else {
             sqlx::query("DELETE FROM email_outbox WHERE id = $1")
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(pool)
                 .await?;
             continue;
         };
@@ -227,7 +241,7 @@ where
             Ok(_) => {
                 sqlx::query("DELETE FROM email_outbox WHERE id = $1")
                     .bind(id)
-                    .execute(&mut *tx)
+                    .execute(pool)
                     .await?;
             }
             Err(error) => match retry_delay(attempts + 1) {
@@ -239,7 +253,7 @@ where
                     )
                     .bind(id)
                     .bind(delay.as_secs_f64())
-                    .execute(&mut *tx)
+                    .execute(pool)
                     .await?;
                 }
                 None => {
@@ -248,13 +262,13 @@ where
                     );
                     sqlx::query("DELETE FROM email_outbox WHERE id = $1")
                         .bind(id)
-                        .execute(&mut *tx)
+                        .execute(pool)
                         .await?;
                 }
             },
         }
     }
-    tx.commit().await
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -360,6 +374,74 @@ mod tests {
         send_due(&pool, &AsyncStubTransport::new_error(), &from)
             .await
             .unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM email_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[sqlx::test]
+    async fn a_failed_record_does_not_resend_earlier_emails(pool: PgPool) {
+        let op = queue(&pool).await;
+        sqlx::query("DELETE FROM email_outbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO email_outbox (id, operator_id, subject, body, next_attempt_at) VALUES
+             ($1, $3, 'first', 'b', now() - interval '2 minutes'),
+             ($2, $3, 'second', 'b', now() - interval '1 minute')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(op)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_second() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF OLD.subject = 'second' THEN RAISE EXCEPTION 'injected failure'; END IF;
+                 RETURN OLD;
+             END $$;
+             CREATE TRIGGER fail_second BEFORE DELETE ON email_outbox
+                 FOR EACH ROW EXECUTE FUNCTION fail_second();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let from: Mailbox = "rmm@example.com".parse().unwrap();
+        let ok = AsyncStubTransport::new_ok();
+        assert!(send_due(&pool, &ok, &from).await.is_err());
+        let sent = ok.messages().await;
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].1.contains("Subject: first"));
+        let left: Vec<(String, bool)> =
+            sqlx::query_as("SELECT subject, next_attempt_at > now() FROM email_outbox")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, vec![("second".to_string(), true)]);
+
+        // Leased: the next run sends nothing.
+        let ok = AsyncStubTransport::new_ok();
+        send_due(&pool, &ok, &from).await.unwrap();
+        assert!(ok.messages().await.is_empty());
+
+        sqlx::raw_sql("DROP TRIGGER fail_second ON email_outbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE email_outbox SET next_attempt_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ok = AsyncStubTransport::new_ok();
+        send_due(&pool, &ok, &from).await.unwrap();
+        let sent = ok.messages().await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains("Subject: second"));
         let left: i64 = sqlx::query_scalar("SELECT count(*) FROM email_outbox")
             .fetch_one(&pool)
             .await

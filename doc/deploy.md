@@ -65,7 +65,7 @@ Alert emails are off unless the Server knows an SMTP server. Set these in `/etc/
 | `--smtp-from` | `RUSTYRMM_SMTP_FROM` | Sender, e.g. `RustyRMM <rmm@example.com>` |
 | `--public-url` | `RUSTYRMM_PUBLIC_URL` | Web UI base URL for links in emails, e.g. `https://rmm.example.com`; required when email is on |
 
-The Server refuses to start if email is on and `--public-url` is missing or `--smtp-from` is not a valid mailbox. An Operator needs an email address to receive email. A failed send is retried after 1, 5 and 25 minutes, then dropped with a line in the journal.
+The Server refuses to start if email is on and `--public-url` is missing or `--smtp-from` is not a valid mailbox. An Operator needs an email address to receive email. A failed send is retried after 1, 5 and 25 minutes, then dropped with a line in the journal. A message is recorded as sent right after SMTP accepts it; if the Server crashes mid-send, the message may be sent again once about 15 minutes have passed.
 
 ## 5. Certificate (certbot)
 
