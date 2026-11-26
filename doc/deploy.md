@@ -25,7 +25,7 @@ Create the `rustyrmm` user, then install the binary from the release installer i
 ```sh
 useradd --system --no-create-home --shell /usr/sbin/nologin rustyrmm
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/mtelahun/rusty-rmm/releases/download/v0.2.0/rustyrmm-server-installer.sh \
+  https://github.com/mtelahun/rusty-rmm/releases/download/v0.2.5/rustyrmm-server-installer.sh \
   | CARGO_HOME=/opt/rustyrmm INSTALLER_NO_MODIFY_PATH=1 sh
 /opt/rustyrmm/bin/rustyrmm-server --version
 ```
