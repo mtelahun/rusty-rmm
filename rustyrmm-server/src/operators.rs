@@ -350,7 +350,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::raw_sql(include_str!("../migrations/0004_operator_email.sql"))
+        sqlx::raw_sql(include_str!("../migrations/0005_operator_email.sql"))
             .execute(&pool)
             .await
             .unwrap();
