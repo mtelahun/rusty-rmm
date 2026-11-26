@@ -37,3 +37,11 @@ export async function all<T>(
   } while (token);
   return out;
 }
+
+// Whole minutes from 5 to 43200 (the API's range), or undefined when the text isn't one.
+export function thresholdMinutes(text: string): number | undefined {
+  const n = Number(text);
+  return /^\d+$/.test(text.trim()) && n >= 5 && n <= 43200 ? n : undefined;
+}
+
+export const THRESHOLD_ERROR = "The offline threshold must be a whole number of minutes from 5 to 43200.";

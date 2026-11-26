@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import type { CreatePairingTokenResponse, Environment, OperatorInfo, PairingToken } from "./gen/rustyrmm/operator/v1/operator_pb";
-import { all, api, message, needsLogin, when } from "./api";
+import { all, api, message, needsLogin, THRESHOLD_ERROR, thresholdMinutes, when } from "./api";
 
 // Same one-liners as `rustyrmm pairing-token create` (rustyrmm-cli/src/main.rs).
 const RELEASES = "https://github.com/mtelahun/rusty-rmm/releases/latest/download";
@@ -122,6 +122,7 @@ export function Environments({ isAdmin, onSessionEnded }: { isAdmin: boolean; on
         </div>
       )}
       {current && <OwnerForm key={current.id} environment={current} saved={load} failed={failed} />}
+      {current && isAdmin && <AlertSettings key={current.id} environment={current} saved={load} failed={failed} />}
       {current && <PairingTokens key={current.id} environment={current} failed={failed} />}
     </main>
   );
@@ -151,6 +152,93 @@ function OwnerForm({ environment, saved, failed }: { environment: Environment; s
           <button type="submit">Save</button>
         </form>
       </div>
+    </section>
+  );
+}
+
+function AlertSettings({ environment, saved, failed }: { environment: Environment; saved: () => void; failed: (e: unknown) => void }) {
+  const [threshold, setThreshold] = useState(environment.offlineThresholdMinutes.toString());
+  const [recipients, setRecipients] = useState(environment.alertRecipients);
+  const [operators, setOperators] = useState<OperatorInfo[]>([]);
+  const [invalid, setInvalid] = useState(false);
+
+  useEffect(() => {
+    api
+      .listOperators({})
+      .then((r) => {
+        setOperators(r.operators);
+      })
+      .catch(failed);
+  }, []);
+
+  const offered = operators.filter((o) => (o.isAdmin || o.environmentIds.includes(environment.id)) && !recipients.includes(o.username));
+  const save = (e: Event) => {
+    e.preventDefault();
+    const offlineThresholdMinutes = thresholdMinutes(threshold);
+    setInvalid(offlineThresholdMinutes === undefined);
+    if (offlineThresholdMinutes === undefined) return;
+    api
+      .setEnvironmentAlertSettings({ environmentId: environment.id, offlineThresholdMinutes, alertRecipients: recipients })
+      .then(saved)
+      .catch(failed);
+  };
+  return (
+    <section>
+      <div class="toolbar">
+        <h3>Alerts for {environment.name}</h3>
+        <form class="inline" onSubmit={save}>
+          <label>
+            Offline threshold (minutes){" "}
+            <input
+              inputMode="numeric"
+              value={threshold}
+              onInput={(e) => {
+                setThreshold(e.currentTarget.value);
+              }}
+            />
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+      {invalid && (
+        <p class="error" role="alert">
+          {THRESHOLD_ERROR}
+        </p>
+      )}
+      <h4>Recipients</h4>
+      {recipients.length === 0 && <p class="muted">No recipients.</p>}
+      <ul>
+        {recipients.map((r) => (
+          <li key={r}>
+            {r}{" "}
+            <button
+              type="button"
+              aria-label={`Remove ${r}`}
+              onClick={() => {
+                setRecipients(recipients.filter((x) => x !== r));
+              }}
+            >
+              Remove
+            </button>
+          </li>
+        ))}
+      </ul>
+      {offered.length > 0 && (
+        <select
+          aria-label="Add recipient"
+          value=""
+          onChange={(e) => {
+            setRecipients([...recipients, e.currentTarget.value]);
+          }}
+        >
+          <option value="">Add recipient…</option>
+          {offered.map((o) => (
+            <option key={o.username} value={o.username}>
+              {o.username}
+            </option>
+          ))}
+        </select>
+      )}
     </section>
   );
 }
