@@ -1,10 +1,14 @@
 //! Background jobs run on a timer inside the Server: Command timeouts, Sample rollups, retention.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::commands;
+use crate::sessions::Sessions;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Retention {
@@ -26,14 +30,24 @@ impl Default for Retention {
 // Fixed by Grilling: Command execution limits.
 pub const OUTCOME_UNKNOWN_GRACE: Duration = Duration::from_secs(300);
 
-/// Runs forever: the Command sweep every minute; rollups and retention every 5 minutes.
-pub async fn run(pool: PgPool, retention: Retention) {
+/// Runs forever: the Command sweep and offline Alerts every minute; rollups and retention every
+/// 5 minutes. `started_at` is when the Server started: Agents need a threshold's time to reconnect.
+pub async fn run(
+    pool: PgPool,
+    retention: Retention,
+    sessions: Arc<Sessions>,
+    started_at: DateTime<Utc>,
+) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     for n in 0u64..=u64::MAX {
         tick.tick().await;
         report(
             "command timeouts",
             commands::mark_outcome_unknown(&pool, OUTCOME_UNKNOWN_GRACE).await,
+        );
+        report(
+            "offline alerts",
+            check_offline_alerts(&pool, &sessions, started_at, Utc::now()).await,
         );
         if n % 5 == 0 {
             report("sample rollup", rollup_samples(&pool).await);
@@ -47,6 +61,117 @@ fn report(job: &str, r: sqlx::Result<u64>) {
         // shortcut: stderr until the Server adopts structured logging.
         eprintln!("{job} job failed: {e}");
     }
+}
+
+const WENT_OFFLINE: i16 = 1;
+const BACK_ONLINE: i16 = 2;
+
+/// An Endpoint, its effective threshold in minutes, and its open Alert (id, last_seen_at), if any.
+#[derive(sqlx::FromRow)]
+struct AlertCandidate {
+    id: Uuid,
+    environment_id: Uuid,
+    hostname: String,
+    last_seen_at: Option<DateTime<Utc>>,
+    alerts_enabled: bool,
+    revoked: bool,
+    threshold_minutes: i32,
+    alert_id: Option<Uuid>,
+    alert_last_seen_at: Option<DateTime<Utc>>,
+}
+
+/// Opens an Alert for each Endpoint that has been Offline past its threshold, and resolves the
+/// open Alerts of Endpoints that are Online again (or no longer alerting). Notifies the
+/// Environment's recipients who still have access. Returns the Alerts opened plus resolved.
+pub async fn check_offline_alerts(
+    pool: &PgPool,
+    sessions: &Sessions,
+    started_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> sqlx::Result<u64> {
+    let candidates: Vec<AlertCandidate> = sqlx::query_as(
+        "SELECT e.id, e.environment_id, e.hostname, e.last_seen_at, e.alerts_enabled,
+                e.revoked_at IS NOT NULL AS revoked,
+                coalesce(e.offline_threshold_minutes, env.offline_threshold_minutes)
+                    AS threshold_minutes,
+                a.id AS alert_id, a.last_seen_at AS alert_last_seen_at
+         FROM endpoints e
+         JOIN environments env ON env.id = e.environment_id
+         LEFT JOIN alerts a ON a.endpoint_id = e.id AND a.resolved_at IS NULL
+         WHERE a.id IS NOT NULL
+            OR (e.revoked_at IS NULL AND e.alerts_enabled AND e.last_seen_at IS NOT NULL)",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut changed = 0;
+    for c in candidates {
+        let online = sessions.is_online(c.id);
+        let threshold = chrono::Duration::minutes(c.threshold_minutes.into());
+        let mut tx = pool.begin().await?;
+        // (kind, last_seen_at, offline_seconds) of the Notification to send, if any.
+        let notify = match (c.alert_id, c.last_seen_at) {
+            (Some(alert), _) if !c.alerts_enabled || c.revoked || online => {
+                sqlx::query("UPDATE alerts SET resolved_at = $2 WHERE id = $1")
+                    .bind(alert)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                // Alerts turned off, or the Endpoint Revoked: resolve silently.
+                let seen = c.alert_last_seen_at.unwrap_or(now);
+                (c.alerts_enabled && !c.revoked)
+                    .then(|| (BACK_ONLINE, seen, Some((now - seen).num_seconds())))
+            }
+            (None, Some(seen))
+                if !online && now - seen > threshold && now - started_at > threshold =>
+            {
+                sqlx::query(
+                    "INSERT INTO alerts (id, endpoint_id, last_seen_at, opened_at)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(Uuid::now_v7())
+                .bind(c.id)
+                .bind(seen)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                Some((WENT_OFFLINE, seen, None))
+            }
+            _ => continue,
+        };
+        if let Some((kind, seen, offline_seconds)) = notify {
+            let recipients: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT r.operator_id FROM environment_alert_recipients r
+                 JOIN operators o ON o.id = r.operator_id
+                 WHERE r.environment_id = $1
+                   AND (o.is_admin OR EXISTS (SELECT 1 FROM environment_members m
+                                              WHERE m.environment_id = r.environment_id
+                                                AND m.operator_id = r.operator_id))",
+            )
+            .bind(c.environment_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for operator_id in recipients {
+                sqlx::query(
+                    "INSERT INTO notifications (id, operator_id, environment_id, hostname, kind,
+                                                last_seen_at, offline_seconds, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(Uuid::now_v7())
+                .bind(operator_id)
+                .bind(c.environment_id)
+                .bind(&c.hostname)
+                .bind(kind)
+                .bind(seen)
+                .bind(offline_seconds)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        changed += 1;
+    }
+    Ok(changed)
 }
 
 /// (Re)computes 5-minute rollups for completed buckets in the last hour. Recomputing the hour
@@ -153,6 +278,10 @@ pub async fn apply_retention(pool: &PgPool, retention: Retention) -> sqlx::Resul
                AND EXISTS (SELECT 1 FROM inventories newer
                            WHERE newer.endpoint_id = old.endpoint_id AND newer.id > old.id)",
             ONE_YEAR,
+        ),
+        (
+            "DELETE FROM notifications WHERE created_at < now() - make_interval(secs => $1)",
+            Duration::from_secs(30 * 86_400),
         ),
         (
             "DELETE FROM operator_sessions WHERE expires_at < now() - make_interval(secs => $1)",
@@ -340,5 +469,296 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(marked, 1);
+    }
+
+    /// An Environment (default threshold) with an Admin recipient "alice" and a member
+    /// recipient "bob"; returns it and the two Operators' ids.
+    async fn alert_env(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let env = Uuid::now_v7();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, 'lab')")
+            .bind(env)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for name in ["alice", "bob"] {
+            ids.push(
+                crate::operators::add_operator(
+                    pool,
+                    name,
+                    "correct horse battery",
+                    &format!("{name}@example.com"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        sqlx::query(
+            "INSERT INTO environment_members (environment_id, operator_id) VALUES ($1, $2)",
+        )
+        .bind(env)
+        .bind(ids[1])
+        .execute(pool)
+        .await
+        .unwrap();
+        for id in &ids {
+            sqlx::query(
+                "INSERT INTO environment_alert_recipients (environment_id, operator_id) VALUES ($1, $2)",
+            )
+            .bind(env)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        (env, ids[0], ids[1])
+    }
+
+    /// An Endpoint of `env` last seen `minutes` before `now`.
+    async fn seen_endpoint(pool: &PgPool, env: Uuid, now: DateTime<Utc>, minutes: i64) -> Uuid {
+        let ep = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO endpoints (id, environment_id, hostname, last_seen_at)
+             VALUES ($1, $2, 'h', $3)",
+        )
+        .bind(ep)
+        .bind(env)
+        .bind(now - chrono::Duration::minutes(minutes))
+        .execute(pool)
+        .await
+        .unwrap();
+        ep
+    }
+
+    async fn count(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    #[sqlx::test]
+    async fn one_outage_is_one_alert_with_a_notification_per_recipient(pool: PgPool) {
+        let (env, _, _) = alert_env(&pool).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        let ep = seen_endpoint(&pool, env, now, 60).await;
+        let sessions = Sessions::default();
+
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM alerts WHERE resolved_at IS NULL"
+            )
+            .await,
+            1
+        );
+        let rows: Vec<(i16, Option<i64>)> =
+            sqlx::query_as("SELECT kind, offline_seconds FROM notifications")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(WENT_OFFLINE, None); 2]);
+
+        // Back Online: resolved, and each recipient hears how long it was Offline.
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let _reg = sessions.register(ep, tx);
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM alerts WHERE resolved_at IS NULL"
+            )
+            .await,
+            0
+        );
+        let rows: Vec<(i16, Option<i64>)> =
+            sqlx::query_as("SELECT kind, offline_seconds FROM notifications WHERE kind = 2")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(BACK_ONLINE, Some(3600)); 2]);
+    }
+
+    #[sqlx::test]
+    async fn no_alert_when_revoked_never_seen_disabled_or_the_server_just_started(pool: PgPool) {
+        let (env, _, _) = alert_env(&pool).await;
+        let now = Utc::now();
+        let long_ago = now - chrono::Duration::hours(2);
+        let revoked = seen_endpoint(&pool, env, now, 60).await;
+        sqlx::query("UPDATE endpoints SET revoked_at = now() WHERE id = $1")
+            .bind(revoked)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let never = seen_endpoint(&pool, env, now, 60).await;
+        sqlx::query("UPDATE endpoints SET last_seen_at = NULL WHERE id = $1")
+            .bind(never)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let disabled = seen_endpoint(&pool, env, now, 60).await;
+        sqlx::query("UPDATE endpoints SET alerts_enabled = false WHERE id = $1")
+            .bind(disabled)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let control = seen_endpoint(&pool, env, now, 60).await;
+        let sessions = Sessions::default();
+
+        // The Server started 5 minutes ago: Agents haven't had a threshold to reconnect.
+        let just_started = now - chrono::Duration::minutes(5);
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, just_started, now)
+                .await
+                .unwrap(),
+            0
+        );
+
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, long_ago, now)
+                .await
+                .unwrap(),
+            1
+        );
+        let alerted: Vec<Uuid> = sqlx::query_scalar("SELECT endpoint_id FROM alerts")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(alerted, vec![control]);
+    }
+
+    #[sqlx::test]
+    async fn an_endpoint_threshold_overrides_the_environment_default(pool: PgPool) {
+        let (env, _, _) = alert_env(&pool).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        // The default is 15 minutes; all three have been Offline for 20 or 10.
+        let raised = seen_endpoint(&pool, env, now, 20).await;
+        let default = seen_endpoint(&pool, env, now, 20).await;
+        let lowered = seen_endpoint(&pool, env, now, 10).await;
+        let _quiet = seen_endpoint(&pool, env, now, 10).await;
+        for (id, minutes) in [(raised, 30), (lowered, 5)] {
+            sqlx::query("UPDATE endpoints SET offline_threshold_minutes = $2 WHERE id = $1")
+                .bind(id)
+                .bind(minutes)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let sessions = Sessions::default();
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            2
+        );
+        let mut alerted: Vec<Uuid> = sqlx::query_scalar("SELECT endpoint_id FROM alerts")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        alerted.sort();
+        let mut expected = vec![default, lowered];
+        expected.sort();
+        assert_eq!(alerted, expected);
+    }
+
+    #[sqlx::test]
+    async fn only_recipients_with_access_are_notified_and_disabling_resolves_silently(
+        pool: PgPool,
+    ) {
+        let (env, _, bob) = alert_env(&pool).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::hours(2);
+        let ep = seen_endpoint(&pool, env, now, 60).await;
+        let sessions = Sessions::default();
+        sqlx::query("DELETE FROM environment_members WHERE operator_id = $1")
+            .bind(bob)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        check_offline_alerts(&pool, &sessions, started, now)
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 1);
+        assert_eq!(
+            count(
+                &pool,
+                &format!("SELECT count(*) FROM notifications WHERE operator_id = '{bob}'")
+            )
+            .await,
+            0
+        );
+
+        sqlx::query("UPDATE endpoints SET alerts_enabled = false WHERE id = $1")
+            .bind(ep)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            check_offline_alerts(&pool, &sessions, started, now)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM alerts WHERE resolved_at IS NULL"
+            )
+            .await,
+            0
+        );
+        assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 1);
+    }
+
+    #[sqlx::test]
+    async fn retention_deletes_notifications_after_30_days(pool: PgPool) {
+        let (env, alice, _) = alert_env(&pool).await;
+        for days in [31, 29] {
+            sqlx::query(
+                "INSERT INTO notifications (id, operator_id, environment_id, hostname, kind,
+                                            last_seen_at, created_at)
+                 VALUES ($1, $2, $3, 'h', 1, now(), now() - make_interval(days => $4))",
+            )
+            .bind(Uuid::now_v7())
+            .bind(alice)
+            .bind(env)
+            .bind(days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        apply_retention(&pool, Retention::default()).await.unwrap();
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM notifications WHERE created_at < now() - interval '30 days'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(count(&pool, "SELECT count(*) FROM notifications").await, 1);
     }
 }

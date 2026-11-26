@@ -112,8 +112,9 @@ impl OperatorService for OperatorApi {
             ));
         }
         let id = Uuid::now_v7();
-        let created_at: DateTime<Utc> = sqlx::query_scalar(
-            "INSERT INTO environments (id, name, owner) VALUES ($1, $2, $3) RETURNING created_at",
+        let (created_at, offline_threshold_minutes): (DateTime<Utc>, i32) = sqlx::query_as(
+            "INSERT INTO environments (id, name, owner) VALUES ($1, $2, $3)
+             RETURNING created_at, offline_threshold_minutes",
         )
         .bind(id)
         .bind(&name)
@@ -131,6 +132,8 @@ impl OperatorService for OperatorApi {
             name,
             created_at: Some(ts(created_at)),
             owner: owner.unwrap_or_default(),
+            offline_threshold_minutes: offline_threshold_minutes as u32,
+            alert_recipients: Vec::new(),
         }))
     }
 
@@ -143,23 +146,82 @@ impl OperatorService for OperatorApi {
         let id = parse_id(&req.id, "id")?;
         let owner = normalise_owner(&req.owner)?;
         self.require_environment(&operator, id).await?;
-        let (id, name, created_at, owner): (Uuid, String, DateTime<Utc>, Option<String>) =
-            sqlx::query_as(
-                "UPDATE environments SET owner = $2 WHERE id = $1
-                 RETURNING id, name, created_at, owner",
-            )
+        sqlx::query_scalar::<_, Uuid>(
+            "UPDATE environments SET owner = $2 WHERE id = $1 RETURNING id",
+        )
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| Status::not_found("no such Environment"))?;
+        let row: EnvironmentRow = sqlx::query_as(&format!("{ENVIRONMENT_SELECT} WHERE e.id = $1"))
             .bind(id)
-            .bind(owner)
-            .fetch_optional(&self.pool)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(Response::new(environment(row)))
+    }
+
+    async fn set_environment_alert_settings(
+        &self,
+        req: Request<SetEnvironmentAlertSettingsRequest>,
+    ) -> Result<Response<Environment>, Status> {
+        require_admin(&authenticate(&self.pool, &req).await?)?;
+        let req = req.into_inner();
+        let id = parse_id(&req.environment_id, "environment_id")?;
+        let minutes = threshold(req.offline_threshold_minutes)?;
+        let mut tx = self.pool.begin().await.map_err(internal)?;
+        let found =
+            sqlx::query("UPDATE environments SET offline_threshold_minutes = $2 WHERE id = $1")
+                .bind(id)
+                .bind(minutes)
+                .execute(&mut *tx)
+                .await
+                .map_err(internal)?
+                .rows_affected();
+        if found == 0 {
+            return Err(Status::not_found("no such Environment"));
+        }
+        sqlx::query("DELETE FROM environment_alert_recipients WHERE environment_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        for username in &req.alert_recipients {
+            let (operator_id, has_access): (Uuid, bool) = sqlx::query_as(
+                "SELECT o.id, o.is_admin OR EXISTS (SELECT 1 FROM environment_members m
+                                                    WHERE m.environment_id = $2 AND m.operator_id = o.id)
+                 FROM operators o WHERE o.username = $1",
+            )
+            .bind(username)
+            .bind(id)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(internal)?
-            .ok_or_else(|| Status::not_found("no such Environment"))?;
-        Ok(Response::new(Environment {
-            id: id.to_string(),
-            name,
-            created_at: Some(ts(created_at)),
-            owner: owner.unwrap_or_default(),
-        }))
+            .ok_or_else(|| Status::not_found(format!("no Operator named {username:?}")))?;
+            if !has_access {
+                return Err(Status::invalid_argument(format!(
+                    "{username:?} has no access to that Environment"
+                )));
+            }
+            sqlx::query(
+                "INSERT INTO environment_alert_recipients (environment_id, operator_id)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(operator_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        }
+        tx.commit().await.map_err(internal)?;
+        let row: EnvironmentRow = sqlx::query_as(&format!("{ENVIRONMENT_SELECT} WHERE e.id = $1"))
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(Response::new(environment(row)))
     }
 
     async fn list_environments(
@@ -169,12 +231,12 @@ impl OperatorService for OperatorApi {
         let operator = authenticate(&self.pool, &req).await?;
         let req = req.into_inner();
         let page = Page::new(req.page_size, &req.page_token)?;
-        let rows: Vec<(Uuid, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-            "SELECT id, name, created_at, owner FROM environments
-             WHERE ($1::uuid IS NULL OR id > $1)
-               AND ($3 OR id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
-             ORDER BY id LIMIT $2",
-        )
+        let rows: Vec<EnvironmentRow> = sqlx::query_as(&format!(
+            "{ENVIRONMENT_SELECT}
+             WHERE ($1::uuid IS NULL OR e.id > $1)
+               AND ($3 OR e.id IN (SELECT environment_id FROM environment_members WHERE operator_id = $4))
+             ORDER BY e.id LIMIT $2"
+        ))
         .bind(page.after)
         .bind(page.fetch())
         .bind(operator.is_admin)
@@ -184,15 +246,7 @@ impl OperatorService for OperatorApi {
         .map_err(internal)?;
         let (rows, next_page_token) = page.split(rows, |r| r.0);
         Ok(Response::new(ListEnvironmentsResponse {
-            environments: rows
-                .into_iter()
-                .map(|(id, name, created_at, owner)| Environment {
-                    id: id.to_string(),
-                    name,
-                    created_at: Some(ts(created_at)),
-                    owner: owner.unwrap_or_default(),
-                })
-                .collect(),
+            environments: rows.into_iter().map(environment).collect(),
             next_page_token,
         }))
     }
@@ -363,6 +417,130 @@ impl OperatorService for OperatorApi {
         }
         self.sessions.disconnect(id); // Marked Revoked first, so it can't reconnect.
         Ok(Response::new(RevokeEndpointResponse {}))
+    }
+
+    async fn set_endpoint_alert_settings(
+        &self,
+        req: Request<SetEndpointAlertSettingsRequest>,
+    ) -> Result<Response<Endpoint>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let id = parse_id(&req.endpoint_id, "endpoint_id")?;
+        self.require_endpoint(&operator, id).await?;
+        let minutes = req.offline_threshold_minutes.map(threshold).transpose()?;
+        let found = sqlx::query(
+            "UPDATE endpoints SET alerts_enabled = $2, offline_threshold_minutes = $3 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(req.alerts_enabled)
+        .bind(minutes)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected();
+        if found == 0 {
+            return Err(no_endpoint());
+        }
+        let row: EndpointRow = sqlx::query_as(&format!("{ENDPOINT_SELECT} WHERE e.id = $1"))
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(internal)?;
+        Ok(Response::new(self.endpoint(row)))
+    }
+
+    async fn list_notifications(
+        &self,
+        req: Request<ListNotificationsRequest>,
+    ) -> Result<Response<ListNotificationsResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let page = Page::new(req.page_size, &req.page_token)?;
+        // Newest first: ids are UUIDv7, so the token is an upper bound.
+        let rows: Vec<NotificationRow> = sqlx::query_as(
+            "SELECT id, hostname, environment_id, kind, last_seen_at, offline_seconds, created_at,
+                    read_at
+             FROM notifications
+             WHERE operator_id = $1 AND ($2::uuid IS NULL OR id < $2)
+               AND ($4 OR environment_id IN
+                    (SELECT environment_id FROM environment_members WHERE operator_id = $1))
+             ORDER BY id DESC LIMIT $3",
+        )
+        .bind(operator.id)
+        .bind(page.after)
+        .bind(page.fetch())
+        .bind(operator.is_admin)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        let (rows, next_page_token) = page.split(rows, |r| r.0);
+        Ok(Response::new(ListNotificationsResponse {
+            notifications: rows
+                .into_iter()
+                .map(
+                    |(
+                        id,
+                        hostname,
+                        environment_id,
+                        kind,
+                        last_seen_at,
+                        offline_seconds,
+                        created_at,
+                        read_at,
+                    )| {
+                        Notification {
+                            id: id.to_string(),
+                            hostname,
+                            environment_id: environment_id.to_string(),
+                            kind: kind.into(),
+                            last_seen_at: Some(ts(last_seen_at)),
+                            offline_duration: offline_seconds
+                                .map(|seconds| prost_types::Duration { seconds, nanos: 0 }),
+                            created_at: Some(ts(created_at)),
+                            read_at: read_at.map(ts),
+                        }
+                    },
+                )
+                .collect(),
+            next_page_token,
+        }))
+    }
+
+    async fn mark_notification_read(
+        &self,
+        req: Request<MarkNotificationReadRequest>,
+    ) -> Result<Response<MarkNotificationReadResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let id = parse_id(&req.into_inner().id, "id")?;
+        let found = sqlx::query(
+            "UPDATE notifications SET read_at = coalesce(read_at, now())
+             WHERE id = $1 AND operator_id = $2",
+        )
+        .bind(id)
+        .bind(operator.id)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?
+        .rows_affected();
+        if found == 0 {
+            return Err(Status::not_found("no such Notification"));
+        }
+        Ok(Response::new(MarkNotificationReadResponse {}))
+    }
+
+    async fn mark_all_notifications_read(
+        &self,
+        req: Request<MarkAllNotificationsReadRequest>,
+    ) -> Result<Response<MarkAllNotificationsReadResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        sqlx::query(
+            "UPDATE notifications SET read_at = now() WHERE operator_id = $1 AND read_at IS NULL",
+        )
+        .bind(operator.id)
+        .execute(&self.pool)
+        .await
+        .map_err(internal)?;
+        Ok(Response::new(MarkAllNotificationsReadResponse {}))
     }
 
     async fn delete_endpoint(
@@ -690,12 +868,63 @@ fn require_admin(operator: &Operator) -> Result<(), Status> {
     }
 }
 
-/// Endpoint columns plus its latest Inventory (encoded), if any.
+/// Environment columns plus its alert recipients' usernames.
+const ENVIRONMENT_SELECT: &str =
+    "SELECT e.id, e.name, e.created_at, e.owner, e.offline_threshold_minutes,
+        ARRAY(SELECT o.username::text FROM environment_alert_recipients r
+              JOIN operators o ON o.id = r.operator_id
+              WHERE r.environment_id = e.id ORDER BY o.username)
+     FROM environments e";
+type EnvironmentRow = (
+    Uuid,
+    String,
+    DateTime<Utc>,
+    Option<String>,
+    i32,
+    Vec<String>,
+);
+
+fn environment((id, name, created_at, owner, minutes, recipients): EnvironmentRow) -> Environment {
+    Environment {
+        id: id.to_string(),
+        name,
+        created_at: Some(ts(created_at)),
+        owner: owner.unwrap_or_default(),
+        offline_threshold_minutes: minutes as u32,
+        alert_recipients: recipients,
+    }
+}
+
+/// An offline threshold is 5 minutes to 30 days.
+fn threshold(minutes: u32) -> Result<i32, Status> {
+    if (5..=43_200).contains(&minutes) {
+        Ok(minutes as i32)
+    } else {
+        Err(Status::invalid_argument(
+            "offline threshold must be 5 to 43200 minutes",
+        ))
+    }
+}
+
+type NotificationRow = (
+    Uuid,
+    String,
+    Uuid,
+    i16,
+    DateTime<Utc>,
+    Option<i64>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+/// Endpoint columns, its alert settings and latest Inventory (encoded), if any.
 const ENDPOINT_SELECT: &str =
     "SELECT e.id, e.environment_id, e.hostname, e.paired_at, e.last_seen_at,
         e.revoked_at IS NOT NULL,
         (SELECT i.inventory FROM inventories i WHERE i.endpoint_id = e.id
-         ORDER BY i.received_at DESC, i.id DESC LIMIT 1)
+         ORDER BY i.received_at DESC, i.id DESC LIMIT 1),
+        e.alerts_enabled, e.offline_threshold_minutes,
+        EXISTS (SELECT 1 FROM alerts a WHERE a.endpoint_id = e.id AND a.resolved_at IS NULL)
      FROM endpoints e";
 type EndpointRow = (
     Uuid,
@@ -705,6 +934,9 @@ type EndpointRow = (
     Option<DateTime<Utc>>,
     bool,
     Option<Vec<u8>>,
+    bool,
+    Option<i32>,
+    bool,
 );
 
 const COMMAND_SELECT: &str = "SELECT id, endpoint_id, endpoint_hostname, operator_username,
@@ -888,7 +1120,18 @@ impl OperatorApi {
 
     fn endpoint(
         &self,
-        (id, environment_id, hostname, paired_at, last_seen_at, revoked, inventory): EndpointRow,
+        (
+            id,
+            environment_id,
+            hostname,
+            paired_at,
+            last_seen_at,
+            revoked,
+            inventory,
+            alerts_enabled,
+            offline_threshold_minutes,
+            alert_open,
+        ): EndpointRow,
     ) -> Endpoint {
         Endpoint {
             id: id.to_string(),
@@ -899,6 +1142,9 @@ impl OperatorApi {
             paired_at: Some(ts(paired_at)),
             last_seen_at: last_seen_at.map(ts),
             inventory: inventory.and_then(|b| Inventory::decode(b.as_slice()).ok()),
+            alerts_enabled,
+            offline_threshold_minutes: offline_threshold_minutes.map(|m| m as u32),
+            alert_open,
         }
     }
 
@@ -2347,6 +2593,284 @@ mod tests {
                 .map(|o| (o.username.as_str(), o.is_admin))
                 .collect::<Vec<_>>(),
             [("admin", false), ("bob", true)]
+        );
+    }
+
+    async fn operator_id(pool: &PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar("SELECT id FROM operators WHERE username = $1")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn alert_settings_are_validated_and_access_controlled(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        for u in ["bob", "carol"] {
+            add_user(&mut client, &admin, u).await;
+        }
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let carol = login(&mut client, "carol", PASSWORD).await.unwrap();
+        let ep = env_and_endpoints(&pool, &["h"]).await[0];
+        let env: Uuid = sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        client
+            .add_environment_member(authed(
+                EnvironmentMemberRequest {
+                    environment_id: env.to_string(),
+                    username: "bob".into(),
+                },
+                &admin,
+            ))
+            .await
+            .unwrap();
+        let env_settings = |token: &str, minutes: u32, who: &[&str]| {
+            authed(
+                SetEnvironmentAlertSettingsRequest {
+                    environment_id: env.to_string(),
+                    offline_threshold_minutes: minutes,
+                    alert_recipients: who.iter().map(|s| s.to_string()).collect(),
+                },
+                token,
+            )
+        };
+
+        // Thresholds: 5 and 43200 minutes are the limits.
+        for minutes in [4, 43_201] {
+            assert_eq!(
+                code(
+                    client
+                        .set_environment_alert_settings(env_settings(&admin, minutes, &[]))
+                        .await
+                ),
+                tonic::Code::InvalidArgument
+            );
+        }
+        for minutes in [5, 43_200] {
+            client
+                .set_environment_alert_settings(env_settings(&admin, minutes, &[]))
+                .await
+                .unwrap();
+        }
+        // Only Admins; recipients must be known and have access.
+        assert_eq!(
+            code(
+                client
+                    .set_environment_alert_settings(env_settings(&bob, 15, &[]))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            code(
+                client
+                    .set_environment_alert_settings(env_settings(&admin, 15, &["carol"]))
+                    .await
+            ),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            code(
+                client
+                    .set_environment_alert_settings(env_settings(&admin, 15, &["nobody"]))
+                    .await
+            ),
+            tonic::Code::NotFound
+        );
+        let set = client
+            .set_environment_alert_settings(env_settings(&admin, 20, &["bob", "admin"]))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            (set.offline_threshold_minutes, set.alert_recipients),
+            (20, vec!["admin".to_string(), "bob".to_string()])
+        );
+        // A failed replace leaves the list untouched.
+        client
+            .set_environment_alert_settings(env_settings(&admin, 15, &["bob", "carol"]))
+            .await
+            .unwrap_err();
+        let listed = client
+            .list_environments(authed(ListEnvironmentsRequest::default(), &admin))
+            .await
+            .unwrap()
+            .into_inner()
+            .environments;
+        assert_eq!(listed[0].alert_recipients.len(), 2);
+        assert_eq!(listed[0].offline_threshold_minutes, 20);
+
+        // Endpoints: any Operator with access, not others.
+        let ep_settings = |token: &str, enabled: bool, minutes: Option<u32>| {
+            authed(
+                SetEndpointAlertSettingsRequest {
+                    endpoint_id: ep.to_string(),
+                    alerts_enabled: enabled,
+                    offline_threshold_minutes: minutes,
+                },
+                token,
+            )
+        };
+        assert_eq!(
+            code(
+                client
+                    .set_endpoint_alert_settings(ep_settings(&carol, true, None))
+                    .await
+            ),
+            tonic::Code::PermissionDenied
+        );
+        for minutes in [4, 43_201] {
+            assert_eq!(
+                code(
+                    client
+                        .set_endpoint_alert_settings(ep_settings(&bob, true, Some(minutes)))
+                        .await
+                ),
+                tonic::Code::InvalidArgument
+            );
+        }
+        let e = client
+            .set_endpoint_alert_settings(ep_settings(&bob, false, Some(5)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            (e.alerts_enabled, e.offline_threshold_minutes, e.alert_open),
+            (false, Some(5), false)
+        );
+        let e = client
+            .set_endpoint_alert_settings(ep_settings(&bob, true, None))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            (e.alerts_enabled, e.offline_threshold_minutes),
+            (true, None)
+        );
+    }
+
+    #[sqlx::test]
+    async fn notifications_are_per_operator_newest_first_and_follow_access(pool: PgPool) {
+        let (mut client, pool) = start(pool).await;
+        let admin = login(&mut client, "admin", PASSWORD).await.unwrap();
+        add_user(&mut client, &admin, "bob").await;
+        let bob = login(&mut client, "bob", PASSWORD).await.unwrap();
+        let ep = env_and_endpoints(&pool, &["h"]).await[0];
+        let env: Uuid = sqlx::query_scalar("SELECT environment_id FROM endpoints WHERE id = $1")
+            .bind(ep)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (admin_id, bob_id) = (
+            operator_id(&pool, "admin").await,
+            operator_id(&pool, "bob").await,
+        );
+        sqlx::query(
+            "INSERT INTO environment_members (environment_id, operator_id) VALUES ($1, $2)",
+        )
+        .bind(env)
+        .bind(bob_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut ids = Vec::new();
+        for (owner, kind) in [(bob_id, 1), (admin_id, 1), (bob_id, 2)] {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO notifications (id, operator_id, environment_id, hostname, kind,
+                                            last_seen_at, offline_seconds)
+                 VALUES ($1, $2, $3, 'h', $4, now(), CASE WHEN $4 = 2 THEN 90 END)",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(env)
+            .bind(kind as i16)
+            .execute(&pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        let list = |mut c: OperatorServiceClient<Channel>, token: String| async move {
+            c.list_notifications(authed(ListNotificationsRequest::default(), &token))
+                .await
+                .unwrap()
+                .into_inner()
+                .notifications
+        };
+
+        let mine = list(client.clone(), bob.clone()).await;
+        assert_eq!(
+            mine.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            vec![ids[2].to_string(), ids[0].to_string()]
+        );
+        assert_eq!(
+            mine[0].offline_duration.as_ref().map(|d| d.seconds),
+            Some(90)
+        );
+        assert_eq!(mine[1].offline_duration, None);
+        assert!(mine[0].read_at.is_none());
+
+        // Marking is limited to the caller's own Notifications.
+        let mark = |id: Uuid, token: &str| {
+            authed(MarkNotificationReadRequest { id: id.to_string() }, token)
+        };
+        assert_eq!(
+            code(client.mark_notification_read(mark(ids[1], &bob)).await),
+            tonic::Code::NotFound
+        );
+        client
+            .mark_notification_read(mark(ids[0], &bob))
+            .await
+            .unwrap();
+        assert!(list(client.clone(), bob.clone()).await[1].read_at.is_some());
+        client
+            .mark_all_notifications_read(authed(MarkAllNotificationsReadRequest {}, &bob))
+            .await
+            .unwrap();
+        assert!(list(client.clone(), bob.clone())
+            .await
+            .iter()
+            .all(|n| n.read_at.is_some()));
+        assert!(list(client.clone(), admin.clone()).await[0]
+            .read_at
+            .is_none());
+
+        // Paging, then losing access to the Environment hides them, but keeps the rows.
+        let page = client
+            .list_notifications(authed(
+                ListNotificationsRequest {
+                    page_size: 1,
+                    page_token: String::new(),
+                },
+                &bob,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            (page.notifications.len(), page.next_page_token.is_empty()),
+            (1, false)
+        );
+        sqlx::query("DELETE FROM environment_members WHERE operator_id = $1")
+            .bind(bob_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(list(client.clone(), bob.clone()).await.is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notifications WHERE operator_id = $1"
+            )
+            .bind(bob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            2
         );
     }
 

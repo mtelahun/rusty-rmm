@@ -52,6 +52,14 @@ _Avoid_: Metric, datapoint, reading
 A reusable, expiring secret tied to one Environment that authorizes Pairing. Operators can revoke it.
 _Avoid_: Enrollment key, invite
 
+**Alert**:
+An Endpoint's offline condition: opened when it has been Offline past its threshold, resolved when it is Online again. At most one is open per Endpoint, so one outage is one Alert.
+_Avoid_: Incident, alarm
+
+**Notification**:
+A message to one Operator through one channel (in the web UI for now) about an Alert opening or resolving. Operators in the Environment's recipient list who can access it each get their own.
+_Avoid_: Alert (that is the condition, not the message)
+
 **Revoked**:
 The state of an Endpoint whose Agent is no longer allowed to open a Session.
 _Avoid_: Disabled, banned, blocked
