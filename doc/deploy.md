@@ -147,3 +147,41 @@ rustyrmm pairing-token create Home
 ```
 
 The command prints one-liners for Linux/macOS and Windows. Run the right one on the Endpoint; it installs the Agent, pairs it and installs its service. The web UI shows the Endpoint in its Environment within a minute. The token is shown only once.
+
+## 11. Upgrading
+
+### Server
+
+As root, rerun the installer with the new release's version, then restart. The Server applies new migrations on startup.
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/mtelahun/rusty-rmm/releases/download/v0.2.5/rustyrmm-server-installer.sh \
+  | CARGO_HOME=/opt/rustyrmm INSTALLER_NO_MODIFY_PATH=1 sh
+systemctl restart rustyrmm-server
+/opt/rustyrmm/bin/rustyrmm-server --version
+```
+
+From a non-root shell, put `sudo` on the `sh` side of the pipe, with the variables after it: `| sudo CARGO_HOME=/opt/rustyrmm INSTALLER_NO_MODIFY_PATH=1 sh`.
+
+### Agent
+
+On each Endpoint, download the new Agent, then reinstall its service. Pairing state is kept, so the Agent comes back as the same Endpoint; no new Pairing Token is needed. Reinstalling alone does not restart a running service, so uninstall first.
+
+Linux/macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/mtelahun/rusty-rmm/releases/download/v0.2.5/rustyrmm-agent-installer.sh | sh
+sudo ~/.cargo/bin/rustyrmm-agent uninstall-service
+sudo ~/.cargo/bin/rustyrmm-agent install-service
+/usr/local/bin/rustyrmm-agent --version
+```
+
+Windows (PowerShell as Administrator):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm https://github.com/mtelahun/rusty-rmm/releases/download/v0.2.5/rustyrmm-agent-installer.ps1 | iex"
+& "$env:USERPROFILE\.cargo\bin\rustyrmm-agent.exe" uninstall-service
+& "$env:USERPROFILE\.cargo\bin\rustyrmm-agent.exe" install-service
+```
