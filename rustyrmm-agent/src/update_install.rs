@@ -267,6 +267,13 @@ impl<H: Host> Installer<H> {
                 Unit::Exited(code) => {
                     record.exit_code = code;
                     seen_active = true;
+                    // Kept in case the Agent stops before the outcome is recorded.
+                    if let Err(e) = save(&self.dir, &record) {
+                        eprintln!(
+                            "Update Install {}: cannot record its exit code: {e}",
+                            record.id
+                        );
+                    }
                 }
                 Unit::Gone => {}
             }
@@ -374,7 +381,7 @@ pub fn parse_unit(out: &str) -> Unit {
             .find_map(|l| l.strip_prefix(name)?.strip_prefix('='))
             .unwrap_or_default()
     };
-    if field("LoadState") != "loaded" {
+    if field("LoadState") == "not-found" {
         return Unit::Gone;
     }
     match field("ActiveState") {
@@ -481,7 +488,8 @@ impl Host for System {
         ];
         match updates::output("systemctl", &args).await {
             Some((0, out)) => parse_unit(&out),
-            _ => Unit::Gone,
+            // Not known to be gone (e.g. systemd itself is being upgraded): ask again later.
+            _ => Unit::Active,
         }
     }
 
@@ -492,7 +500,7 @@ impl Host for System {
 
 /// Whether another process holds a write lock on the file. dpkg, apt and rpm use fcntl record
 /// locks, which `flock` does not see, so this asks with `F_GETLK` without taking the lock.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn lock_held(path: &Path) -> bool {
     use std::os::fd::AsRawFd;
     let Ok(file) = std::fs::File::open(path) else {
@@ -506,7 +514,7 @@ fn lock_held(path: &Path) -> bool {
     r == 0 && i32::from(lock.l_type) != libc::F_UNLCK
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn lock_held(_: &Path) -> bool {
     false
 }
