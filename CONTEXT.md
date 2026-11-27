@@ -68,6 +68,10 @@ _Avoid_: Disabled, banned, blocked
 One pending operating-system update on an Endpoint (a Linux package upgrade or a Windows update), which may be a security Update. Patch management is the feature that shows and installs them.
 _Avoid_: Patch, package
 
+**Update Install**:
+An Operator's request to install Updates on one Endpoint, ending in a result per Update. Runs apart from the Agent so it outlives an Agent restart, and is never killed. Installing across an Environment creates one Update Install per Endpoint.
+_Avoid_: Patch job, deployment
+
 **Inventory**:
 The descriptive snapshot of an Endpoint: hardware, OS, network and update status. Contrast with a Sample, which is a point-in-time measurement.
 _Avoid_: Endpoint Information, facts, specs
