@@ -325,3 +325,65 @@ async fn result_finished_while_disconnected_is_resent(pool: PgPool) {
     assert_eq!(stdout, b"done\n");
     agent.abort();
 }
+
+// --- Update Installs ---
+
+/// An outcome recorded before a restart is sent by the next Session until the Server
+/// acknowledges it, and then forgotten. Nothing here runs a package manager or systemd.
+#[sqlx::test(migrations = "../rustyrmm-server/migrations")]
+async fn recorded_update_install_outcome_is_resent_until_acknowledged(pool: PgPool) {
+    use prost::Message;
+    use rustyrmm_proto::common::v1::{
+        UpdateInstallOutcome, UpdateInstallOutcomeKind, UpdateResult, UpdateResultStatus,
+    };
+    use rustyrmm_proto::operator::v1::UpdateInstallStatus;
+    use update_install::{Manager, Record};
+
+    let server = start(pool, Settings::default()).await;
+    let (dir, ep) = server.pair().await;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO update_installs (id, endpoint_id, endpoint_hostname, operator_username,
+                                      selection, reboot, status)
+         VALUES ($1, $2, '', 'alice', 1, 1, $3)",
+    )
+    .bind(id)
+    .bind(ep)
+    .bind(UpdateInstallStatus::Running as i16)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    let outcome = UpdateInstallOutcome {
+        id: id.to_string(),
+        kind: UpdateInstallOutcomeKind::Finished as i32,
+        results: vec![UpdateResult {
+            package: "openssl".into(),
+            status: UpdateResultStatus::Installed as i32,
+            exit_code: None,
+        }],
+        ..Default::default()
+    };
+    let record = Record {
+        id: id.to_string(),
+        unit: format!("rustyrmm-update-{id}"),
+        security: false,
+        manager: Manager::Apt,
+        pending: vec!["openssl".into()],
+        started_at: 0,
+        exit_code: Some(0),
+        outcome: Some(hex::encode(outcome.encode_to_vec())),
+    };
+    let state = dir.path().join("update-install.json");
+    std::fs::write(&state, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let path = dir.path().to_path_buf();
+    let agent = tokio::spawn(async move { session::run(&path).await });
+    eventually("the acknowledged outcome is forgotten", || !state.exists()).await;
+    let status: i16 = sqlx::query_scalar("SELECT status FROM update_installs WHERE id = $1")
+        .bind(id)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, UpdateInstallStatus::Succeeded as i16);
+    agent.abort();
+}
