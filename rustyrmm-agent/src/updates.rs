@@ -16,7 +16,7 @@ pub async fn check() -> UpdateStatus {
 }
 
 /// Runs a command and returns (exit code, stdout), or None if it can't run or times out.
-async fn output(program: &str, args: &[&str]) -> Option<(i32, String)> {
+pub(crate) async fn output(program: &str, args: &[&str]) -> Option<(i32, String)> {
     let run = Command::new(program).args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(TIMEOUT, run).await.ok()?.ok()?;
     Some((
@@ -100,16 +100,63 @@ pub fn parse_apt(out: &str) -> UpdateStatus {
     split(inst.len() as u32, Some(security))
 }
 
+/// The package names in `apt-get -s dist-upgrade` output, only `-security` ones if `security`.
+pub fn apt_packages(out: &str, security: bool) -> Vec<String> {
+    out.lines()
+        .filter(|l| l.starts_with("Inst ") && (!security || l.contains("-security")))
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter(|n| is_package_name(n))
+        .map(String::from)
+        .collect()
+}
+
 /// `dnf -q check-update`: package lines are `name.arch  version  repo`; stop at the
 /// "Obsoleting Packages" section, which repeats packages.
 pub fn count_dnf_packages(out: &str) -> u32 {
+    dnf_package_lines(out).count() as u32
+}
+
+fn dnf_package_lines(out: &str) -> impl Iterator<Item = Vec<&str>> {
     out.lines()
         .take_while(|l| !l.starts_with("Obsoleting"))
-        .filter(|l| {
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|cols| cols.len() == 3 && cols[0].contains('.'))
+}
+
+/// The package names (without `.arch`) in `dnf -q check-update` output.
+pub fn dnf_packages(out: &str) -> Vec<String> {
+    let mut names: Vec<String> = dnf_package_lines(out)
+        .filter_map(|cols| cols[0].rsplit_once('.').map(|(name, _)| name.to_string()))
+        .filter(|n| is_package_name(n))
+        .collect();
+    names.dedup();
+    names
+}
+
+/// The package names in `dnf -q updateinfo list --security` output, whose last column is
+/// `name-[epoch:]version-release.arch`.
+pub fn dnf_advisory_packages(out: &str) -> Vec<String> {
+    let mut names: Vec<String> = out
+        .lines()
+        .filter_map(|l| {
             let cols: Vec<&str> = l.split_whitespace().collect();
-            cols.len() == 3 && cols[0].contains('.')
+            (cols.len() >= 3).then(|| cols[cols.len() - 1])
         })
-        .count() as u32
+        .filter_map(|nevra| nevra.rsplitn(3, '-').nth(2))
+        .filter(|n| is_package_name(n))
+        .map(String::from)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Names go on the package manager's command line, so one never starts like an option.
+fn is_package_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-._:".contains(c))
 }
 
 /// `dnf -q updateinfo list --security`: `ADVISORY  severity/Sec.  package`; count packages.
@@ -160,6 +207,39 @@ mod tests {
         assert_eq!(count_dnf_advisory_packages(sec), 1);
         let s = split(2, Some(1));
         assert_eq!((s.regular, s.security), (Some(1), Some(1)));
+    }
+
+    #[test]
+    fn apt_lists_package_names_for_all_and_security() {
+        let out = "NOTE: This is only a simulation!\n\
+            Inst libssl3 [3.0.2-0ubuntu1.14] (3.0.2-0ubuntu1.15 Ubuntu:22.04/jammy-security [amd64])\n\
+            Inst curl [7.81.0-1ubuntu1.15] (7.81.0-1ubuntu1.16 Ubuntu:22.04/jammy-updates [amd64])\n\
+            Inst linux-image-6.8.0-50-generic (6.8.0-50.51 Ubuntu:22.04/jammy-security [amd64])\n\
+            Inst -oops [1] (2 Ubuntu:22.04/jammy-updates [amd64])\n\
+            Conf libssl3 (3.0.2-0ubuntu1.15 Ubuntu:22.04/jammy-security [amd64])\n";
+        assert_eq!(
+            apt_packages(out, false),
+            ["libssl3", "curl", "linux-image-6.8.0-50-generic"],
+            "a name that looks like an option is dropped"
+        );
+        assert_eq!(
+            apt_packages(out, true),
+            ["libssl3", "linux-image-6.8.0-50-generic"]
+        );
+    }
+
+    #[test]
+    fn dnf_lists_package_names_for_all_and_security() {
+        let out = "\nkernel.x86_64   6.8.1-1.fc40   updates\n\
+            openssl.x86_64  1:3.2.1-2.fc40 updates\n\
+            python3-libs.x86_64  3.12.3-1.fc40 updates\n\
+            Obsoleting Packages\n\
+            foo.noarch      1.0-1.fc40     updates\n";
+        assert_eq!(dnf_packages(out), ["kernel", "openssl", "python3-libs"]);
+        let sec = "FEDORA-2024-aa Important/Sec. openssl-1:3.2.1-2.fc40.x86_64\n\
+            FEDORA-2024-bb Moderate/Sec.  openssl-1:3.2.1-2.fc40.x86_64\n\
+            FEDORA-2024-cc Low/Sec.       python3-libs-3.12.3-1.fc40.x86_64\n";
+        assert_eq!(dnf_advisory_packages(sec), ["openssl", "python3-libs"]);
     }
 
     #[test]

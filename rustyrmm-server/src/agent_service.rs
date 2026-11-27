@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::ca::{Ca, IssuedCert};
 use crate::sessions::{Registration, Sessions, Settings};
-use crate::{commands, ingest, pairing};
+use crate::{commands, ingest, pairing, update_installs};
 
 /// Agents older than this protocol version are refused at Hello.
 pub const MIN_PROTOCOL_VERSION: u32 = 1;
@@ -169,6 +169,21 @@ async fn run_session(
             }
             Some(agent_message::Message::ProcessList(list)) => {
                 sessions.complete_process_list(endpoint_id, list)
+            }
+            Some(agent_message::Message::UpdateInstallStarted(started)) => {
+                log_err(update_installs::record_started(&pool, endpoint_id, &started.id).await)
+            }
+            Some(agent_message::Message::UpdateInstallOutcome(outcome)) => {
+                // Acknowledged on every receipt (duplicates too) once stored, so the Agent
+                // stops resending; a storage error leaves it unacknowledged to be resent.
+                match update_installs::record_outcome(&pool, endpoint_id, &outcome).await {
+                    Ok(()) => {
+                        if let Some(outbound) = sessions.sender(endpoint_id) {
+                            let _ = outbound.send(Ok(update_installs::ack(outcome.id))).await;
+                        }
+                    }
+                    Err(e) => log_err(Err(e)),
+                }
             }
             // Heartbeats only keep the Session alive; a repeated Hello is ignored.
             Some(agent_message::Message::Heartbeat(_))
@@ -860,5 +875,133 @@ mod tests {
             .request_process_list(offline, Duration::from_secs(5))
             .await;
         assert_eq!(err.unwrap_err(), LiveError::Offline);
+    }
+
+    // --- Update Installs ---
+
+    use crate::update_installs::{request, NewUpdateInstall};
+    use rustyrmm_proto::agent::v1::UpdateInstallStarted;
+    use rustyrmm_proto::common::v1::{
+        OsInfo, UpdateInstallOutcome, UpdateInstallOutcomeKind, UpdateResult, UpdateResultStatus,
+        UpdateSelection,
+    };
+    use rustyrmm_proto::operator::v1::UpdateInstallStatus;
+
+    fn outcome(
+        id: &str,
+        kind: UpdateInstallOutcomeKind,
+        status: UpdateResultStatus,
+    ) -> AgentMessage {
+        msg(agent_message::Message::UpdateInstallOutcome(
+            UpdateInstallOutcome {
+                id: id.into(),
+                kind: kind as i32,
+                results: vec![UpdateResult {
+                    package: "openssl".into(),
+                    status: status as i32,
+                    exit_code: None,
+                }],
+                ..Default::default()
+            },
+        ))
+    }
+
+    async fn install_status(h: &Harness, id: Uuid) -> i16 {
+        sqlx::query_scalar("SELECT status FROM update_installs WHERE id = $1")
+            .bind(id)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn next_ack(stream: &mut Streaming<ServerMessage>) -> String {
+        let sent = stream.message().await.unwrap().unwrap();
+        let Some(server_message::Message::UpdateInstallAck(ack)) = sent.message else {
+            panic!("expected UpdateInstallAck, got {sent:?}");
+        };
+        ack.id
+    }
+
+    #[sqlx::test]
+    async fn update_install_outcomes_are_stored_once_and_always_acknowledged(pool: PgPool) {
+        use UpdateInstallOutcomeKind as Kind;
+        use UpdateResultStatus as Result;
+        let h = start(pool).await;
+        let (ep, tx, mut stream) = online(&h).await;
+        let (_other, other_tx, mut other_stream) = online(&h).await;
+        let linux = Inventory {
+            os: Some(OsInfo {
+                family: "linux".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        tx.send(msg(agent_message::Message::Inventory(linux)))
+            .await
+            .unwrap();
+        flush(&h, &tx).await;
+
+        let new = NewUpdateInstall {
+            endpoint_id: ep,
+            operator_username: "alice".into(),
+            selection: UpdateSelection::All,
+        };
+        let (id, status) = request(&h.pool, &h.sessions, new).await.unwrap();
+        assert_eq!(status, UpdateInstallStatus::Requested);
+        let sent = stream.message().await.unwrap().unwrap();
+        let Some(server_message::Message::UpdateInstall(req)) = sent.message else {
+            panic!("expected UpdateInstallRequest, got {sent:?}");
+        };
+        assert_eq!(req.id, id.to_string());
+
+        tx.send(msg(agent_message::Message::UpdateInstallStarted(
+            UpdateInstallStarted { id: req.id.clone() },
+        )))
+        .await
+        .unwrap();
+        flush(&h, &tx).await;
+        assert_eq!(
+            install_status(&h, id).await,
+            UpdateInstallStatus::Running as i16
+        );
+
+        // Another Endpoint cannot end it (its outcome is still acknowledged to it).
+        other_tx
+            .send(outcome(&req.id, Kind::Finished, Result::Installed))
+            .await
+            .unwrap();
+        assert_eq!(next_ack(&mut other_stream).await, req.id);
+        assert_eq!(
+            install_status(&h, id).await,
+            UpdateInstallStatus::Running as i16
+        );
+
+        tx.send(outcome(&req.id, Kind::Interrupted, Result::Unspecified))
+            .await
+            .unwrap();
+        assert_eq!(next_ack(&mut stream).await, req.id);
+        assert_eq!(
+            install_status(&h, id).await,
+            UpdateInstallStatus::Interrupted as i16
+        );
+
+        // A late outcome with results still ends an Interrupted one; a resend is ignored but
+        // acknowledged again.
+        tx.send(outcome(&req.id, Kind::Finished, Result::Installed))
+            .await
+            .unwrap();
+        assert_eq!(next_ack(&mut stream).await, req.id);
+        assert_eq!(
+            install_status(&h, id).await,
+            UpdateInstallStatus::Succeeded as i16
+        );
+        tx.send(outcome(&req.id, Kind::Finished, Result::Failed))
+            .await
+            .unwrap();
+        assert_eq!(next_ack(&mut stream).await, req.id);
+        assert_eq!(
+            install_status(&h, id).await,
+            UpdateInstallStatus::Succeeded as i16
+        );
     }
 }

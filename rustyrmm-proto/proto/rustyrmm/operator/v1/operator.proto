@@ -76,6 +76,13 @@ service OperatorService {
   rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
   rpc GetCommand(GetCommandRequest) returns (CommandRecord);
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+
+  // Linux (apt, dnf) only: FAILED_PRECONDITION for other Endpoints. An Offline or busy
+  // Endpoint is not an error: the returned record is Skipped (Offline) or Rejected (busy).
+  // INVALID_ARGUMENT for a reboot policy other than never.
+  rpc InstallUpdates(InstallUpdatesRequest) returns (UpdateInstallRecord);
+  rpc GetUpdateInstall(GetUpdateInstallRequest) returns (UpdateInstallRecord);
+  rpc ListUpdateInstalls(ListUpdateInstallsRequest) returns (ListUpdateInstallsResponse);
 }
 
 // --- Operators ---
@@ -458,5 +465,59 @@ message ListCommandsRequest {
 
 message ListCommandsResponse {
   repeated CommandRecord commands = 1;
+  string next_page_token = 2;
+}
+// --- Update Installs ---
+
+message InstallUpdatesRequest {
+  string endpoint_id = 1;
+  bool security_only = 2;
+  rustyrmm.common.v1.RebootPolicy reboot = 3;
+}
+
+enum UpdateInstallStatus {
+  UPDATE_INSTALL_STATUS_UNSPECIFIED = 0;
+  // Sent to the Agent; not started yet.
+  UPDATE_INSTALL_STATUS_REQUESTED = 1;
+  UPDATE_INSTALL_STATUS_RUNNING = 2;
+  // Every selected Update is installed or was not pending.
+  UPDATE_INSTALL_STATUS_SUCCEEDED = 3;
+  UPDATE_INSTALL_STATUS_FAILED = 4;
+  UPDATE_INSTALL_STATUS_INTERRUPTED = 5;
+  // Another Update Install was unfinished, or the package manager was busy.
+  UPDATE_INSTALL_STATUS_REJECTED_BUSY = 6;
+  // The Endpoint had no live Session; nothing was sent.
+  UPDATE_INSTALL_STATUS_SKIPPED_OFFLINE = 7;
+}
+
+message UpdateInstallRecord {
+  string id = 1;
+  string endpoint_id = 2;
+  // Kept so the record survives DeleteEndpoint.
+  string endpoint_hostname = 3;
+  string operator_username = 4;
+  rustyrmm.common.v1.UpdateSelection selection = 5;
+  rustyrmm.common.v1.RebootPolicy reboot = 6;
+  UpdateInstallStatus status = 7;
+  google.protobuf.Timestamp created_at = 8;
+  optional google.protobuf.Timestamp started_at = 9;
+  optional google.protobuf.Timestamp finished_at = 10;
+  repeated rustyrmm.common.v1.UpdateResult results = 11;
+  // The Agent's Update check after the install; absent until it finishes.
+  optional rustyrmm.common.v1.UpdateStatus updates = 12;
+}
+
+message GetUpdateInstallRequest {
+  string id = 1;
+}
+
+message ListUpdateInstallsRequest {
+  optional string endpoint_id = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListUpdateInstallsResponse {
+  repeated UpdateInstallRecord update_installs = 1;
   string next_page_token = 2;
 }

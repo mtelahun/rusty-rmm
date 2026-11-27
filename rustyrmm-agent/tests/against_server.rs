@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rustyrmm_agent::session::{self, renew_if_due};
 use rustyrmm_agent::state::Paired;
+use rustyrmm_agent::update_install::{self, Installer};
 use rustyrmm_agent::{pairing, tls};
 use rustyrmm_proto::agent::v1::agent_service_client::AgentServiceClient;
 use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
@@ -160,7 +161,9 @@ async fn heartbeats_keep_the_session_alive(pool: PgPool) {
     let paired = Paired::load(dir.path()).unwrap();
 
     let outbox = Arc::new(rustyrmm_agent::commands::Outbox::default());
-    let session = tokio::spawn(async move { session::session_once(&paired, &outbox).await });
+    let installer = Installer::new(dir.path(), update_install::System);
+    let session =
+        tokio::spawn(async move { session::session_once(&paired, &outbox, &installer).await });
     eventually("Endpoint Online", || server.sessions.is_online(ep)).await;
     // Three times the offline timeout: without heartbeats the Server would have closed it.
     sleep(Duration::from_secs(3)).await;
@@ -320,5 +323,67 @@ async fn result_finished_while_disconnected_is_resent(pool: PgPool) {
     server.sessions.disconnect(ep);
     let (_, stdout) = completed(&server.pool, id).await;
     assert_eq!(stdout, b"done\n");
+    agent.abort();
+}
+
+// --- Update Installs ---
+
+/// An outcome recorded before a restart is sent by the next Session until the Server
+/// acknowledges it, and then forgotten. Nothing here runs a package manager or systemd.
+#[sqlx::test(migrations = "../rustyrmm-server/migrations")]
+async fn recorded_update_install_outcome_is_resent_until_acknowledged(pool: PgPool) {
+    use prost::Message;
+    use rustyrmm_proto::common::v1::{
+        UpdateInstallOutcome, UpdateInstallOutcomeKind, UpdateResult, UpdateResultStatus,
+    };
+    use rustyrmm_proto::operator::v1::UpdateInstallStatus;
+    use update_install::{Manager, Record};
+
+    let server = start(pool, Settings::default()).await;
+    let (dir, ep) = server.pair().await;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO update_installs (id, endpoint_id, endpoint_hostname, operator_username,
+                                      selection, reboot, status)
+         VALUES ($1, $2, '', 'alice', 1, 1, $3)",
+    )
+    .bind(id)
+    .bind(ep)
+    .bind(UpdateInstallStatus::Running as i16)
+    .execute(&server.pool)
+    .await
+    .unwrap();
+    let outcome = UpdateInstallOutcome {
+        id: id.to_string(),
+        kind: UpdateInstallOutcomeKind::Finished as i32,
+        results: vec![UpdateResult {
+            package: "openssl".into(),
+            status: UpdateResultStatus::Installed as i32,
+            exit_code: None,
+        }],
+        ..Default::default()
+    };
+    let record = Record {
+        id: id.to_string(),
+        unit: format!("rustyrmm-update-{id}"),
+        security: false,
+        manager: Manager::Apt,
+        pending: vec!["openssl".into()],
+        started_at: 0,
+        exit_code: Some(0),
+        outcome: Some(hex::encode(outcome.encode_to_vec())),
+    };
+    let state = dir.path().join("update-install.json");
+    std::fs::write(&state, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let path = dir.path().to_path_buf();
+    let agent = tokio::spawn(async move { session::run(&path).await });
+    eventually("the acknowledged outcome is forgotten", || !state.exists()).await;
+    let status: i16 = sqlx::query_scalar("SELECT status FROM update_installs WHERE id = $1")
+        .bind(id)
+        .fetch_one(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, UpdateInstallStatus::Succeeded as i16);
     agent.abort();
 }

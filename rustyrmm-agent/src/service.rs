@@ -10,6 +10,10 @@ pub const SERVICE_NAME: &str = "rustyrmm-agent";
 pub const LAUNCHD_LABEL: &str = "com.rustyrmm.agent";
 pub const SYSTEMD_UNIT_PATH: &str = "/etc/systemd/system/rustyrmm-agent.service";
 pub const LAUNCHD_PLIST_PATH: &str = "/Library/LaunchDaemons/com.rustyrmm.agent.plist";
+pub const NEEDRESTART_CONF_PATH: &str = "/etc/needrestart/conf.d/rustyrmm.conf";
+/// Stops needrestart restarting the Agent during an Update Install (Debian/Ubuntu run it after
+/// apt installs): the install runs apart from the Agent, but the Agent reports its outcome.
+pub const NEEDRESTART_CONF: &str = "$nrconf{override_rc}{qr(^rustyrmm-agent\\.service$)} = 0;\n";
 
 /// Where the service's copy of the binary lives.
 pub fn installed_binary() -> PathBuf {
@@ -143,6 +147,9 @@ mod os {
 
     pub fn install(exe: &Path, state_dir: &Path) -> anyhow::Result<()> {
         std::fs::write(SYSTEMD_UNIT_PATH, systemd_unit(exe, state_dir))?;
+        let conf = Path::new(NEEDRESTART_CONF_PATH);
+        std::fs::create_dir_all(conf.parent().expect("an absolute path"))?;
+        std::fs::write(conf, NEEDRESTART_CONF)?;
         run_cmd("systemctl", &["daemon-reload"])?;
         run_cmd("systemctl", &["enable", "--now", SERVICE_NAME])
     }
@@ -153,7 +160,10 @@ mod os {
             std::fs::remove_file(SYSTEMD_UNIT_PATH)?;
             run_cmd("systemctl", &["daemon-reload"])?;
         }
-        Ok(())
+        match std::fs::remove_file(NEEDRESTART_CONF_PATH) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -342,6 +352,17 @@ mod tests {
         ));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));
+    }
+
+    #[test]
+    fn needrestart_conf_leaves_the_agent_alone() {
+        assert_eq!(
+            NEEDRESTART_CONF,
+            concat!(
+                r"$nrconf{override_rc}{qr(^rustyrmm-agent\.service$)} = 0;",
+                "\n"
+            )
+        );
     }
 
     #[test]

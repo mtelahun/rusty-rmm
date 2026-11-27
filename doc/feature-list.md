@@ -17,6 +17,7 @@ Get information about the Endpoint:
 - Per Disk - total, usage, io usage
 - IP addresses
 - Update status - normal updates, security updates
+- Update Install (Linux: apt, dnf) - install all pending or security Updates on one Endpoint, never rebooting
 - client version
 
 ## Installed Software

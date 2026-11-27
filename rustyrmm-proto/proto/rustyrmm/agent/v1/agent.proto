@@ -49,6 +49,9 @@ message AgentMessage {
     rustyrmm.common.v1.Sample sample = 4;
     rustyrmm.common.v1.CommandResult command_result = 5;
     ProcessList process_list = 6;
+    UpdateInstallStarted update_install_started = 7;
+    // Resent until the Server acknowledges it with UpdateInstallAck.
+    rustyrmm.common.v1.UpdateInstallOutcome update_install_outcome = 8;
   }
 }
 
@@ -64,11 +67,18 @@ message ProcessList {
   repeated rustyrmm.common.v1.ProcessInfo processes = 2;
 }
 
+// The Update Install's package manager unit has started.
+message UpdateInstallStarted {
+  string id = 1;
+}
+
 message ServerMessage {
   oneof message {
     HelloAck hello_ack = 1;
     rustyrmm.common.v1.Command command = 2;
     ProcessListRequest process_list_request = 3;
+    rustyrmm.common.v1.UpdateInstallRequest update_install = 4;
+    UpdateInstallAck update_install_ack = 5;
   }
 }
 
@@ -80,4 +90,9 @@ message HelloAck {
 
 message ProcessListRequest {
   string request_id = 1;
+}
+
+// The Server stored the UpdateInstallOutcome with this id; the Agent stops resending it.
+message UpdateInstallAck {
+  string id = 1;
 }
