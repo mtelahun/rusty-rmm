@@ -127,3 +127,63 @@ message CommandResult {
   // The Agent killed the process tree at the timeout; exit_code is then absent.
   bool timed_out = 8;
 }
+
+enum UpdateSelection {
+  UPDATE_SELECTION_UNSPECIFIED = 0;
+  // Every pending Update.
+  UPDATE_SELECTION_ALL = 1;
+  // Only security Updates.
+  UPDATE_SELECTION_SECURITY = 2;
+}
+
+enum RebootPolicy {
+  REBOOT_POLICY_UNSPECIFIED = 0;
+  REBOOT_POLICY_NEVER = 1;
+}
+
+// An Operator's request to install pending Updates on an Endpoint. Runs at most once.
+message UpdateInstallRequest {
+  // Server-generated UUIDv7.
+  string id = 1;
+  UpdateSelection selection = 2;
+  RebootPolicy reboot = 3;
+}
+
+enum UpdateInstallOutcomeKind {
+  UPDATE_INSTALL_OUTCOME_KIND_UNSPECIFIED = 0;
+  // The package manager ran (or nothing was pending); see the per-Update results.
+  UPDATE_INSTALL_OUTCOME_KIND_FINISHED = 1;
+  // Another Update Install was unfinished or the package manager's lock was held.
+  UPDATE_INSTALL_OUTCOME_KIND_REJECTED_BUSY = 2;
+  UPDATE_INSTALL_OUTCOME_KIND_FAILED_TO_START = 3;
+  // The install unit was gone and its outcome unknown (e.g. the Agent was down when it ended).
+  UPDATE_INSTALL_OUTCOME_KIND_INTERRUPTED = 4;
+}
+
+enum UpdateResultStatus {
+  UPDATE_RESULT_STATUS_UNSPECIFIED = 0;
+  // Pending at request time and no longer pending.
+  UPDATE_RESULT_STATUS_INSTALLED = 1;
+  // Still pending after the install.
+  UPDATE_RESULT_STATUS_FAILED = 2;
+  // Selected but not pending at request time.
+  UPDATE_RESULT_STATUS_NOT_PENDING = 3;
+}
+
+message UpdateResult {
+  // The package name.
+  string package = 1;
+  UpdateResultStatus status = 2;
+  // The package manager's exit code, for a failed Update; absent when it was not observed.
+  optional int32 exit_code = 3;
+}
+
+message UpdateInstallOutcome {
+  string id = 1;
+  UpdateInstallOutcomeKind kind = 2;
+  repeated UpdateResult results = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  // The fresh read-only Update check after the install.
+  UpdateStatus updates = 6;
+}
