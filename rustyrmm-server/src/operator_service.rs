@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use prost::Message;
 use rustyrmm_proto::common::v1::{
-    CommandResult, DiskSample, InterfaceSample, Interpreter, Inventory, Sample,
+    CommandResult, DiskSample, InterfaceSample, Interpreter, Inventory, RebootPolicy, Sample,
+    UpdateResult, UpdateSelection, UpdateStatus,
 };
 use rustyrmm_proto::operator::v1::operator_service_server::OperatorService;
 use rustyrmm_proto::operator::v1::*;
@@ -20,6 +21,7 @@ use crate::commands::{self, DispatchError, NewCommand};
 use crate::operators::{self, AddOperatorError, SetAdminError, SetEmailError};
 use crate::pairing;
 use crate::sessions::{LiveError, Sessions};
+use crate::update_installs::{self, NewUpdateInstall, RequestError};
 
 pub const DEFAULT_PAIRING_TOKEN_TTL: chrono::Duration = chrono::Duration::days(7);
 const DEFAULT_PAGE_SIZE: u32 = 100;
@@ -885,6 +887,98 @@ impl OperatorService for OperatorApi {
         }))
     }
 
+    async fn install_updates(
+        &self,
+        req: Request<InstallUpdatesRequest>,
+    ) -> Result<Response<UpdateInstallRecord>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let endpoint_id = parse_id(&req.endpoint_id, "endpoint_id")?;
+        self.require_endpoint(&operator, endpoint_id).await?;
+        // Only "never" exists in this version; the other policies come with reboot tracking.
+        if !matches!(
+            RebootPolicy::try_from(req.reboot),
+            Ok(RebootPolicy::Unspecified | RebootPolicy::Never)
+        ) {
+            return Err(Status::invalid_argument("reboot must be never"));
+        }
+        let new = NewUpdateInstall {
+            endpoint_id,
+            operator_username: operator.username,
+            selection: if req.security_only {
+                UpdateSelection::Security
+            } else {
+                UpdateSelection::All
+            },
+        };
+        let id = match update_installs::request(&self.pool, &self.sessions, new).await {
+            Ok((id, _)) => id,
+            Err(RequestError::NotFound) => return Err(no_endpoint()),
+            Err(e @ RequestError::Unsupported) => {
+                return Err(Status::failed_precondition(e.to_string()))
+            }
+            Err(RequestError::Db(e)) => return Err(internal(e)),
+        };
+        Ok(Response::new(self.update_install(id).await?))
+    }
+
+    async fn get_update_install(
+        &self,
+        req: Request<GetUpdateInstallRequest>,
+    ) -> Result<Response<UpdateInstallRecord>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let id = parse_id(&req.into_inner().id, "id")?;
+        let record = self.update_install(id).await?;
+        // As for Commands: a deleted Endpoint's records are for Admins only.
+        self.require_endpoint(&operator, record.endpoint_id.parse().map_err(internal)?)
+            .await
+            .map_err(|e| match e.code() {
+                tonic::Code::NotFound => Status::permission_denied("that Endpoint was deleted"),
+                _ => e,
+            })?;
+        Ok(Response::new(record))
+    }
+
+    async fn list_update_installs(
+        &self,
+        req: Request<ListUpdateInstallsRequest>,
+    ) -> Result<Response<ListUpdateInstallsResponse>, Status> {
+        let operator = authenticate(&self.pool, &req).await?;
+        let req = req.into_inner();
+        let endpoint_id = req
+            .endpoint_id
+            .as_deref()
+            .map(|id| parse_id(id, "endpoint_id"))
+            .transpose()?;
+        if let Some(id) = endpoint_id {
+            self.require_endpoint(&operator, id).await?;
+        }
+        let page = Page::new(req.page_size, &req.page_token)?;
+        // Newest first: page backwards through the time-ordered ids.
+        let rows: Vec<UpdateInstallRow> = sqlx::query_as(&format!(
+            "{UPDATE_INSTALL_SELECT}
+             WHERE ($1::uuid IS NULL OR endpoint_id = $1) AND ($2::uuid IS NULL OR id < $2)
+               AND ($4 OR endpoint_id IN
+                    (SELECT e.id FROM endpoints e
+                     JOIN environment_members m ON m.environment_id = e.environment_id
+                     WHERE m.operator_id = $5))
+             ORDER BY id DESC LIMIT $3"
+        ))
+        .bind(endpoint_id)
+        .bind(page.after)
+        .bind(page.fetch())
+        .bind(operator.is_admin)
+        .bind(operator.id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(internal)?;
+        let (rows, next_page_token) = page.split(rows, |r| r.id);
+        Ok(Response::new(ListUpdateInstallsResponse {
+            update_installs: rows.into_iter().map(update_install_from_row).collect(),
+            next_page_token,
+        }))
+    }
+
     async fn who_am_i(
         &self,
         req: Request<WhoAmIRequest>,
@@ -1226,6 +1320,56 @@ fn command_from_row(r: CommandRow) -> CommandRecord {
     }
 }
 
+const UPDATE_INSTALL_SELECT: &str = "SELECT id, endpoint_id, endpoint_hostname, operator_username,
+        selection, reboot, status, created_at, started_at, finished_at, results,
+        updates_regular, updates_security
+     FROM update_installs";
+
+#[derive(sqlx::FromRow)]
+struct UpdateInstallRow {
+    id: Uuid,
+    endpoint_id: Uuid,
+    endpoint_hostname: String,
+    operator_username: String,
+    selection: i16,
+    reboot: i16,
+    status: i16,
+    created_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    results: serde_json::Value,
+    updates_regular: Option<i32>,
+    updates_security: Option<i32>,
+}
+
+fn update_install_from_row(r: UpdateInstallRow) -> UpdateInstallRecord {
+    let results = r.results.as_array().map(Vec::as_slice).unwrap_or_default();
+    UpdateInstallRecord {
+        id: r.id.to_string(),
+        endpoint_id: r.endpoint_id.to_string(),
+        endpoint_hostname: r.endpoint_hostname,
+        operator_username: r.operator_username,
+        selection: r.selection.into(),
+        reboot: r.reboot.into(),
+        status: r.status.into(),
+        created_at: Some(ts(r.created_at)),
+        started_at: r.started_at.map(ts),
+        finished_at: r.finished_at.map(ts),
+        results: results
+            .iter()
+            .map(|v| UpdateResult {
+                package: v["package"].as_str().unwrap_or_default().into(),
+                status: v["status"].as_i64().unwrap_or_default() as i32,
+                exit_code: v["exit_code"].as_i64().map(|c| c as i32),
+            })
+            .collect(),
+        updates: r.finished_at.map(|_| UpdateStatus {
+            regular: r.updates_regular.map(|n| n as u32),
+            security: r.updates_security.map(|n| n as u32),
+        }),
+    }
+}
+
 /// (time, cpu, memory used, memory total, disks, interfaces) from samples or sample_rollups.
 type SampleRow = (
     DateTime<Utc>,
@@ -1415,6 +1559,17 @@ impl OperatorApi {
             offline_threshold_minutes: offline_threshold_minutes.map(|m| m as u32),
             alert_open,
         }
+    }
+
+    async fn update_install(&self, id: Uuid) -> Result<UpdateInstallRecord, Status> {
+        let row: UpdateInstallRow =
+            sqlx::query_as(&format!("{UPDATE_INSTALL_SELECT} WHERE id = $1"))
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| Status::not_found("no such Update Install"))?;
+        Ok(update_install_from_row(row))
     }
 
     /// Maps a live-Session failure to a status, telling an unknown Endpoint from an Offline one.
@@ -2407,6 +2562,246 @@ mod tests {
         );
     }
 
+    async fn set_os_family(pool: &PgPool, ep: Uuid, family: &str) {
+        let inv = Inventory {
+            os: Some(rustyrmm_proto::common::v1::OsInfo {
+                family: family.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        sqlx::query("INSERT INTO inventories (endpoint_id, collected_at, received_at, inventory) VALUES ($1, now(), now(), $2)")
+            .bind(ep)
+            .bind(inv.encode_to_vec())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn update_installs_run_through_their_states(pool: PgPool) {
+        use rustyrmm_proto::common::v1::{
+            UpdateInstallOutcome, UpdateInstallOutcomeKind, UpdateResultStatus,
+        };
+        let (mut client, pool, sessions) = start_with_sessions(pool).await;
+        let token = login(&mut client, "admin", PASSWORD).await.unwrap();
+        let ep = env_and_endpoints(&pool, &["web-01"]).await[0];
+        set_os_family(&pool, ep, "linux").await;
+        let (mut rx, _reg) = online(&sessions, ep);
+        let install = |security_only: bool| {
+            authed(
+                InstallUpdatesRequest {
+                    endpoint_id: ep.to_string(),
+                    security_only,
+                    reboot: RebootPolicy::Never as i32,
+                },
+                &token,
+            )
+        };
+        let get = |id: &str| authed(GetUpdateInstallRequest { id: id.into() }, &token);
+        let outcome = |id: &str, results: Vec<UpdateResult>| UpdateInstallOutcome {
+            id: id.into(),
+            kind: UpdateInstallOutcomeKind::Finished as i32,
+            results,
+            ..Default::default()
+        };
+        let result =
+            |package: &str, status: UpdateResultStatus, exit_code: Option<i32>| UpdateResult {
+                package: package.into(),
+                status: status as i32,
+                exit_code,
+            };
+
+        let first = client
+            .install_updates(install(true))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.status, UpdateInstallStatus::Requested as i32);
+        assert_eq!(
+            (
+                first.operator_username.as_str(),
+                first.endpoint_hostname.as_str(),
+                first.selection,
+                first.reboot
+            ),
+            (
+                "admin",
+                "web-01",
+                UpdateSelection::Security as i32,
+                RebootPolicy::Never as i32
+            )
+        );
+        let Some(server_message::Message::UpdateInstall(sent)) =
+            rx.recv().await.unwrap().unwrap().message
+        else {
+            panic!("expected an UpdateInstallRequest");
+        };
+        assert_eq!(sent.id, first.id);
+        assert_eq!(sent.selection, UpdateSelection::Security as i32);
+
+        // A second request while the first is Requested, then Running, is busy and not sent.
+        for _ in 0..2 {
+            let busy = client
+                .install_updates(install(false))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(busy.status, UpdateInstallStatus::RejectedBusy as i32);
+            assert!(rx.try_recv().is_err(), "nothing is sent");
+            update_installs::record_started(&pool, ep, &first.id)
+                .await
+                .unwrap();
+        }
+        let running = client
+            .get_update_install(get(&first.id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(running.status, UpdateInstallStatus::Running as i32);
+        assert!(running.started_at.is_some());
+
+        update_installs::record_outcome(
+            &pool,
+            ep,
+            &outcome(
+                &first.id,
+                vec![
+                    result("openssl", UpdateResultStatus::Installed, None),
+                    result("curl", UpdateResultStatus::NotPending, None),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let done = client
+            .get_update_install(get(&first.id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(done.status, UpdateInstallStatus::Succeeded as i32);
+        assert_eq!(done.results.len(), 2);
+
+        // Once the first has ended, a new request is accepted; a failed Update fails it.
+        let second = client
+            .install_updates(install(false))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.status, UpdateInstallStatus::Requested as i32);
+        assert!(rx.recv().await.is_some());
+        update_installs::record_outcome(
+            &pool,
+            ep,
+            &outcome(
+                &second.id,
+                vec![
+                    result("openssl", UpdateResultStatus::Installed, None),
+                    result("kernel", UpdateResultStatus::Failed, Some(100)),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let failed = client
+            .get_update_install(get(&second.id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(failed.status, UpdateInstallStatus::Failed as i32);
+        assert_eq!(
+            failed.results[1],
+            result("kernel", UpdateResultStatus::Failed, Some(100))
+        );
+
+        let list = client
+            .list_update_installs(authed(
+                ListUpdateInstallsRequest {
+                    endpoint_id: Some(ep.to_string()),
+                    page_size: 0,
+                    page_token: String::new(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .update_installs;
+        let ids: Vec<&str> = list.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(
+            (ids[0], ids[3]),
+            (second.id.as_str(), first.id.as_str()),
+            "newest first"
+        );
+    }
+
+    #[sqlx::test]
+    async fn update_installs_are_refused_offline_or_unsupported(pool: PgPool) {
+        let (mut client, pool, _sessions) = start_with_sessions(pool).await;
+        let token = login(&mut client, "admin", PASSWORD).await.unwrap();
+        let eps = env_and_endpoints(&pool, &["linux", "mac", "new"]).await;
+        set_os_family(&pool, eps[0], "linux").await;
+        set_os_family(&pool, eps[1], "macos").await;
+        let install = |ep: Uuid, reboot: i32| {
+            authed(
+                InstallUpdatesRequest {
+                    endpoint_id: ep.to_string(),
+                    security_only: false,
+                    reboot,
+                },
+                &token,
+            )
+        };
+        let offline = client
+            .install_updates(install(eps[0], 0))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(offline.status, UpdateInstallStatus::SkippedOffline as i32);
+        assert_eq!(
+            offline.reboot,
+            RebootPolicy::Never as i32,
+            "unspecified means never"
+        );
+        for ep in [eps[1], eps[2]] {
+            assert_eq!(
+                code(client.install_updates(install(ep, 0)).await),
+                tonic::Code::FailedPrecondition,
+                "macOS and an unknown OS are unsupported"
+            );
+        }
+        assert_eq!(
+            code(client.install_updates(install(eps[0], 2)).await),
+            tonic::Code::InvalidArgument
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM update_installs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 1, "only the Offline one");
+
+        // The partial unique index allows one unfinished Update Install per Endpoint.
+        let unfinished = |status: i16| {
+            sqlx::query(
+                "INSERT INTO update_installs (id, endpoint_id, endpoint_hostname, operator_username,
+                                              selection, reboot, status)
+                 VALUES ($1, $2, 'linux', 'x', 1, 1, $3)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(eps[0])
+            .bind(status)
+            .execute(&pool)
+        };
+        unfinished(UpdateInstallStatus::Requested as i16)
+            .await
+            .unwrap();
+        let err = unfinished(UpdateInstallStatus::Running as i16)
+            .await
+            .unwrap_err();
+        assert!(err.as_database_error().unwrap().is_unique_violation());
+    }
+
     #[sqlx::test]
     async fn process_list_is_live_and_errors_say_why(pool: PgPool) {
         let (mut client, pool, sessions) = start_with_sessions(pool).await;
@@ -2489,7 +2884,7 @@ mod tests {
         env: Uuid,
     ) -> Vec<(&'static str, bool)> {
         let ep = Uuid::now_v7();
-        let (cmd, pt) = (Uuid::now_v7(), Uuid::now_v7());
+        let (cmd, pt, ui) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         sqlx::query("INSERT INTO endpoints (id, environment_id, hostname) VALUES ($1, $2, 'h')")
             .bind(ep)
             .bind(env)
@@ -2516,11 +2911,22 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let (env, ep, cmd, pt) = (
+        sqlx::query(
+            "INSERT INTO update_installs (id, endpoint_id, endpoint_hostname, operator_username,
+                                          selection, reboot, status)
+             VALUES ($1, $2, 'h', 'x', 1, 1, 3)",
+        )
+        .bind(ui)
+        .bind(ep)
+        .execute(pool)
+        .await
+        .unwrap();
+        let (env, ep, cmd, pt, ui) = (
             env.to_string(),
             ep.to_string(),
             cmd.to_string(),
             pt.to_string(),
+            ui.to_string(),
         );
         let denied = |r: Result<(), Status>| {
             r.err()
@@ -2658,6 +3064,47 @@ mod tests {
                     client
                         .list_commands(authed(
                             ListCommandsRequest {
+                                endpoint_id: Some(ep.clone()),
+                                page_size: 0,
+                                page_token: String::new(),
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "install_updates",
+                denied(
+                    client
+                        .install_updates(authed(
+                            InstallUpdatesRequest {
+                                endpoint_id: ep.clone(),
+                                security_only: false,
+                                reboot: 0,
+                            },
+                            token,
+                        ))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "get_update_install",
+                denied(
+                    client
+                        .get_update_install(authed(GetUpdateInstallRequest { id: ui }, token))
+                        .await
+                        .map(drop),
+                ),
+            ),
+            (
+                "list_update_installs",
+                denied(
+                    client
+                        .list_update_installs(authed(
+                            ListUpdateInstallsRequest {
                                 endpoint_id: Some(ep.clone()),
                                 page_size: 0,
                                 page_token: String::new(),

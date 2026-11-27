@@ -12,4 +12,5 @@ pub mod operator_service;
 pub mod operators;
 pub mod pairing;
 pub mod sessions;
+pub mod update_installs;
 pub mod web_ui;
