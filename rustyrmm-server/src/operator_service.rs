@@ -1161,7 +1161,8 @@ const ENDPOINT_SELECT: &str =
         (SELECT i.inventory FROM inventories i WHERE i.endpoint_id = e.id
          ORDER BY i.received_at DESC, i.id DESC LIMIT 1),
         e.alerts_enabled, e.offline_threshold_minutes,
-        EXISTS (SELECT 1 FROM alerts a WHERE a.endpoint_id = e.id AND a.resolved_at IS NULL)
+        EXISTS (SELECT 1 FROM alerts a WHERE a.endpoint_id = e.id AND a.resolved_at IS NULL),
+        e.boot_time
      FROM endpoints e";
 type EndpointRow = (
     Uuid,
@@ -1174,6 +1175,7 @@ type EndpointRow = (
     bool,
     Option<i32>,
     bool,
+    Option<DateTime<Utc>>,
 );
 
 const COMMAND_SELECT: &str = "SELECT id, endpoint_id, endpoint_hostname, operator_username,
@@ -1400,6 +1402,7 @@ impl OperatorApi {
             alerts_enabled,
             offline_threshold_minutes,
             alert_open,
+            boot_time,
         ): EndpointRow,
     ) -> Endpoint {
         Endpoint {
@@ -1414,6 +1417,7 @@ impl OperatorApi {
             alerts_enabled,
             offline_threshold_minutes: offline_threshold_minutes.map(|m| m as u32),
             alert_open,
+            boot_time: boot_time.map(ts),
         }
     }
 

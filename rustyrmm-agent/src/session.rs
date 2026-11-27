@@ -82,6 +82,14 @@ pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Resu
     tx.send(message(agent_message::Message::Hello(Hello {
         agent_version: env!("CARGO_PKG_VERSION").into(),
         protocol_version: PROTOCOL_VERSION,
+        // An error or 0 means the boot time is unreadable.
+        boot_time: match sysinfo::System::boot_time().unwrap_or(0) {
+            0 => None,
+            secs => Some(prost_types::Timestamp {
+                seconds: secs as i64,
+                nanos: 0,
+            }),
+        },
     })))
     .await?;
     let mut inbound = client

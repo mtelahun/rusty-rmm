@@ -253,6 +253,8 @@ message Endpoint {
   optional uint32 offline_threshold_minutes = 10;
   // An Alert is open: the Endpoint has been Offline past its threshold.
   bool alert_open = 11;
+  // When the Endpoint last booted, as of its latest Session; absent if never reported.
+  optional google.protobuf.Timestamp boot_time = 12;
 }
 
 message SetEndpointAlertSettingsRequest {
