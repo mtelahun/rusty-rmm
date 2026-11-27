@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rustyrmm_proto::common::v1::Interpreter;
+use rustyrmm_proto::common::v1::{Interpreter, RebootPolicy, UpdateResultStatus, UpdateSelection};
 use rustyrmm_proto::operator::v1::*;
 use tonic::Status;
 
@@ -88,6 +88,11 @@ enum Cmd {
     Command {
         #[command(subcommand)]
         command: CommandCmd,
+    },
+    /// Install pending Updates (Linux: apt, dnf). Never reboots.
+    Updates {
+        #[command(subcommand)]
+        command: UpdatesCmd,
     },
     /// Operators.
     Operator {
@@ -177,6 +182,26 @@ enum CommandCmd {
     },
     Show {
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdatesCmd {
+    /// Install all pending Updates on a Linux Endpoint, or only security ones.
+    Install {
+        /// Endpoint id or hostname.
+        endpoint: String,
+        /// Only security Updates.
+        #[arg(long)]
+        security: bool,
+        /// Wait until it ends; exits 0 only if it Succeeded.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Update Installs, newest first.
+    Installs {
+        /// Only this Endpoint (id or hostname).
+        endpoint: Option<String>,
     },
 }
 
@@ -664,6 +689,70 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 }
             }
         }
+        Cmd::Updates { command } => {
+            let mut api = Api::from_saved().await?;
+            match command {
+                UpdatesCmd::Install {
+                    endpoint,
+                    security,
+                    wait,
+                } => {
+                    let ep = endpoint_by_ref(&mut api, &endpoint).await?;
+                    let req = api.req(InstallUpdatesRequest {
+                        endpoint_id: ep.id,
+                        security_only: security,
+                        reboot: RebootPolicy::Never as i32,
+                    });
+                    let r = api
+                        .client
+                        .install_updates(req)
+                        .await
+                        .map_err(status)?
+                        .into_inner();
+                    if !wait {
+                        println!("{}", update_install_details(r, json));
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    return wait_for_update_install(&mut api, r.id, json).await;
+                }
+                UpdatesCmd::Installs { endpoint } => {
+                    let endpoint_id = match endpoint {
+                        Some(e) => Some(endpoint_by_ref(&mut api, &e).await?.id),
+                        None => None,
+                    };
+                    let req = api.req(ListUpdateInstallsRequest {
+                        endpoint_id,
+                        page_size: 50,
+                        page_token: String::new(),
+                    });
+                    let r = api
+                        .client
+                        .list_update_installs(req)
+                        .await
+                        .map_err(status)?
+                        .into_inner();
+                    let mut t = Table::new(&[
+                        "id",
+                        "created",
+                        "endpoint",
+                        "operator",
+                        "selection",
+                        "status",
+                    ]);
+                    for u in r.update_installs {
+                        t.row(vec![
+                            u.id,
+                            time(u.created_at.as_ref()),
+                            u.endpoint_hostname,
+                            u.operator_username,
+                            selection_text(u.selection),
+                            update_install_status_text(u.status),
+                        ]);
+                    }
+                    println!("{}", t.render(json));
+                }
+            }
+        }
         Cmd::Operator {
             command:
                 OperatorCmd::Add {
@@ -805,6 +894,91 @@ async fn wait_for(api: &mut Api, id: String, json: bool) -> anyhow::Result<ExitC
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Polls until the Update Install ends, prints it with each Update's result, and exits 0 only
+/// if it Succeeded.
+async fn wait_for_update_install(
+    api: &mut Api,
+    id: String,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    loop {
+        let r = api
+            .client
+            .get_update_install(api.req(GetUpdateInstallRequest { id: id.clone() }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        let unfinished = [UpdateInstallStatus::Requested, UpdateInstallStatus::Running];
+        if unfinished.iter().any(|s| *s as i32 == r.status) {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+        let succeeded = r.status == UpdateInstallStatus::Succeeded as i32;
+        println!("{}", update_install_details(r, json));
+        return Ok(if succeeded {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
+}
+
+fn update_install_details(r: UpdateInstallRecord, json: bool) -> String {
+    let results = r
+        .results
+        .iter()
+        .map(|u| {
+            let status = match UpdateResultStatus::try_from(u.status) {
+                Ok(UpdateResultStatus::Installed) => "installed".into(),
+                Ok(UpdateResultStatus::Failed) => match u.exit_code {
+                    Some(code) => format!("failed (exit code {code})"),
+                    None => "failed".into(),
+                },
+                Ok(UpdateResultStatus::NotPending) => "not pending".into(),
+                _ => "unknown".into(),
+            };
+            format!("{}: {status}", u.package)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    details(
+        &[
+            ("id", r.id),
+            ("endpoint", r.endpoint_hostname),
+            ("operator", r.operator_username),
+            ("selection", selection_text(r.selection)),
+            ("status", update_install_status_text(r.status)),
+            ("created", time(r.created_at.as_ref())),
+            ("finished", time(r.finished_at.as_ref())),
+            ("updates", results),
+        ],
+        json,
+    )
+}
+
+fn selection_text(selection: i32) -> String {
+    match UpdateSelection::try_from(selection) {
+        Ok(UpdateSelection::Security) => "security",
+        Ok(UpdateSelection::All) => "all",
+        _ => "unknown",
+    }
+    .into()
+}
+
+fn update_install_status_text(status: i32) -> String {
+    match UpdateInstallStatus::try_from(status) {
+        Ok(UpdateInstallStatus::Requested) => "requested",
+        Ok(UpdateInstallStatus::Running) => "running",
+        Ok(UpdateInstallStatus::Succeeded) => "succeeded",
+        Ok(UpdateInstallStatus::Failed) => "failed",
+        Ok(UpdateInstallStatus::Interrupted) => "interrupted",
+        Ok(UpdateInstallStatus::RejectedBusy) => "rejected (busy)",
+        Ok(UpdateInstallStatus::SkippedOffline) => "skipped (offline)",
+        _ => "unknown",
+    }
+    .into()
 }
 
 async fn environments(api: &mut Api) -> anyhow::Result<Vec<Environment>> {

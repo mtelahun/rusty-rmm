@@ -247,6 +247,32 @@ async fn operator_pairs_an_agent_and_runs_a_command(pool: PgPool) {
     assert_eq!(after["revoked"], "yes");
     assert_eq!(after["online"], "no");
 
+    // Update Installs run only after the Agent is gone (Skipped (Offline)), so this machine's
+    // packages are never touched. The Agent reported this machine's OS, which must be Linux.
+    if cfg!(target_os = "linux") {
+        let (r, h) = (rig.clone(), hostname.clone());
+        let (all, security, installs, help) = blocking(move || {
+            (
+                r.json(&["updates", "install", &h]),
+                r.json(&["updates", "install", &h, "--security"]),
+                r.json(&["updates", "installs"]),
+                r.cli(&["updates", "install", "--help"]),
+            )
+        })
+        .await;
+        assert_eq!(security["status"], "skipped (offline)");
+        assert_eq!(security["selection"], "security");
+        assert_eq!(security["operator"], "admin");
+        let installs = installs.as_array().unwrap();
+        assert_eq!(installs.len(), 2);
+        assert_eq!(installs[0]["id"], security["id"], "newest first");
+        assert_eq!(installs[1]["id"], all["id"]);
+        assert_eq!(installs[1]["selection"], "all");
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--security") && help.contains("--wait"));
+        assert!(!help.contains("--reboot"));
+    }
+
     let r = rig.clone();
     let (logout, after_logout) =
         blocking(move || (r.cli(&["logout"]), r.cli(&["env", "list"]))).await;
