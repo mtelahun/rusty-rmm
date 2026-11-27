@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rustyrmm_agent::session::{self, renew_if_due};
 use rustyrmm_agent::state::Paired;
+use rustyrmm_agent::update_install::{self, Installer};
 use rustyrmm_agent::{pairing, tls};
 use rustyrmm_proto::agent::v1::agent_service_client::AgentServiceClient;
 use rustyrmm_proto::agent::v1::agent_service_server::AgentServiceServer;
@@ -160,7 +161,9 @@ async fn heartbeats_keep_the_session_alive(pool: PgPool) {
     let paired = Paired::load(dir.path()).unwrap();
 
     let outbox = Arc::new(rustyrmm_agent::commands::Outbox::default());
-    let session = tokio::spawn(async move { session::session_once(&paired, &outbox).await });
+    let installer = Installer::new(dir.path(), update_install::System);
+    let session =
+        tokio::spawn(async move { session::session_once(&paired, &outbox, &installer).await });
     eventually("Endpoint Online", || server.sessions.is_online(ep)).await;
     // Three times the offline timeout: without heartbeats the Server would have closed it.
     sleep(Duration::from_secs(3)).await;

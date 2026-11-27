@@ -20,6 +20,7 @@ use crate::commands::{self, Outbox};
 use crate::pairing::host;
 use crate::state::Paired;
 use crate::telemetry;
+use crate::update_install::{self, Installer};
 
 /// Sent in Hello; the Server refuses Agents below its minimum.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -36,12 +37,16 @@ pub async fn run(dir: &Path) -> anyhow::Result<()> {
     Paired::load(dir)?; // Fail fast if not paired.
                         // Outlives each Session, so results finished while disconnected are resent.
     let outbox = Arc::new(Outbox::default());
+    // An Update Install left from before a restart is waited for, or settled, apart from the
+    // Sessions.
+    let installer = Installer::new(dir, update_install::System);
+    tokio::spawn(installer.clone().reattach());
     let mut backoff = BACKOFF_MIN;
     loop {
         let started = Instant::now();
         // Reload each time: the certificate may have been renewed.
         let result = match Paired::load(dir) {
-            Ok(paired) => session_once(&paired, &outbox).await,
+            Ok(paired) => session_once(&paired, &outbox, &installer).await,
             Err(e) => Err(e),
         };
         match result {
@@ -76,7 +81,11 @@ pub async fn connect(paired: &Paired) -> anyhow::Result<Channel> {
 
 /// One Session: Hello, then heartbeats at the Server's interval, until the stream ends.
 /// Returns Ok when the Server closes the Session cleanly.
-pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Result<()> {
+pub async fn session_once(
+    paired: &Paired,
+    outbox: &Arc<Outbox>,
+    installer: &Arc<Installer<update_install::System>>,
+) -> anyhow::Result<()> {
     let mut client = AgentServiceClient::new(connect(paired).await?);
     let (tx, rx) = mpsc::channel(16);
     tx.send(message(agent_message::Message::Hello(Hello {
@@ -117,13 +126,17 @@ pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Resu
     // Results already sent in this Session; everything else retained gets (re)sent.
     let mut sent: HashSet<String> = HashSet::new();
     send_new_results(&tx, outbox, &mut sent).await?;
+    send_update_install_outcome(&tx, installer).await?;
 
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 tx.send(message(agent_message::Message::Heartbeat(Heartbeat {}))).await?;
+                // Resent until acknowledged: the Server ignores duplicates.
+                send_update_install_outcome(&tx, installer).await?;
             }
             _ = outbox.added.notified() => send_new_results(&tx, outbox, &mut sent).await?,
+            _ = installer.ready.notified() => send_update_install_outcome(&tx, installer).await?,
             _ = renew_check.tick() => {
                 if let Err(e) = renew_if_due(&mut client, paired, RENEW_WITHIN).await {
                     eprintln!("certificate renewal failed (will retry): {e:#}");
@@ -147,6 +160,11 @@ pub async fn session_once(paired: &Paired, outbox: &Arc<Outbox>) -> anyhow::Resu
                             let _ = tx.send(message(agent_message::Message::ProcessList(list))).await;
                         });
                     }
+                    // Runs apart from the Session; the outcome is recorded and resent.
+                    Some(server_message::Message::UpdateInstall(req)) => {
+                        tokio::spawn(installer.clone().request(req, tx.clone()));
+                    }
+                    Some(server_message::Message::UpdateInstallAck(ack)) => installer.acknowledge(&ack.id),
                     Some(server_message::Message::HelloAck(_)) | None => {}
                 },
             },
@@ -194,6 +212,19 @@ async fn send_new_results(
             tx.send(message(agent_message::Message::CommandResult(result)))
                 .await?;
         }
+    }
+    Ok(())
+}
+
+async fn send_update_install_outcome(
+    tx: &mpsc::Sender<AgentMessage>,
+    installer: &Installer<update_install::System>,
+) -> anyhow::Result<()> {
+    if let Some(outcome) = installer.unsent() {
+        tx.send(message(agent_message::Message::UpdateInstallOutcome(
+            outcome,
+        )))
+        .await?;
     }
     Ok(())
 }
