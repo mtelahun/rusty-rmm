@@ -61,6 +61,28 @@ message UpdateStatus {
   optional uint32 security = 2;
 }
 
+// The Updates pending on an Endpoint, one entry each. Sent apart from Inventory.
+message PendingUpdates {
+  // False when the check failed or is unsupported on this OS: `updates` is then meaningless
+  // and the Server keeps its last list. True with no `updates` means nothing is pending.
+  bool known = 1;
+  repeated PendingUpdate updates = 2;
+  // When the OS last refreshed its package metadata; absent when unreadable.
+  optional google.protobuf.Timestamp metadata_refreshed_at = 3;
+}
+
+message PendingUpdate {
+  // What an install names: the package name (apt) or name.arch (dnf).
+  string install_key = 1;
+  string title = 2;
+  // Absent when unknown.
+  optional bool security = 3;
+  string new_version = 4;
+  optional string installed_version = 5;
+  optional string severity = 6;
+  optional string advisory_id = 7;
+}
+
 // One point-in-time Monitoring measurement from an Endpoint.
 message Sample {
   google.protobuf.Timestamp collected_at = 1;

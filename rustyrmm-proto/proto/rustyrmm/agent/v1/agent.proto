@@ -49,6 +49,7 @@ message AgentMessage {
     rustyrmm.common.v1.Sample sample = 4;
     rustyrmm.common.v1.CommandResult command_result = 5;
     ProcessList process_list = 6;
+    rustyrmm.common.v1.PendingUpdates pending_updates = 7;
   }
 }
 

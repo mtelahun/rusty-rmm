@@ -164,6 +164,9 @@ async fn run_session(
             Some(agent_message::Message::Sample(sample)) => {
                 log_err(ingest::sample(&pool, endpoint_id, &sample).await)
             }
+            Some(agent_message::Message::PendingUpdates(list)) => {
+                log_err(ingest::pending_updates(&pool, endpoint_id, &list).await)
+            }
             Some(agent_message::Message::CommandResult(result)) => {
                 log_err(commands::record_result(&pool, endpoint_id, &result).await)
             }

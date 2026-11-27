@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rustyrmm_proto::agent::v1::{agent_message, AgentMessage};
 use rustyrmm_proto::common::v1::{
     CpuInfo, DiskInfo, DiskSample, InterfaceSample, Inventory, NetworkInterface, OsInfo,
-    ProcessInfo, Sample,
+    PendingUpdates, ProcessInfo, Sample,
 };
 use sysinfo::{
     CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind, ProcessesToUpdate,
@@ -84,16 +84,18 @@ impl Sampler {
     }
 }
 
-/// Collects the Inventory. Slow parts (update checks) run as child processes with a timeout.
-pub async fn inventory() -> anyhow::Result<Inventory> {
+/// Collects the Inventory and the pending Updates. Slow parts (update checks) run as child
+/// processes with a timeout.
+pub async fn inventory() -> anyhow::Result<(Inventory, PendingUpdates)> {
     let mut inv = tokio::task::spawn_blocking(static_inventory).await??;
     let (virt_system, virt_role) = virtualization().await;
     if let Some(os) = inv.os.as_mut() {
         os.virt_system = virt_system;
         os.virt_role = virt_role;
     }
-    inv.updates = Some(crate::updates::check().await);
-    Ok(inv)
+    let (status, pending) = crate::updates::check().await;
+    inv.updates = Some(status);
+    Ok((inv, pending))
 }
 
 fn static_inventory() -> anyhow::Result<Inventory> {
@@ -292,33 +294,38 @@ pub async fn send_samples(tx: mpsc::Sender<AgentMessage>, every: Duration) {
 }
 
 /// Sends the Inventory now, then every `every` if it changed (ignoring `collected_at`).
+/// The pending Updates go in their own message, also only when they changed.
 pub async fn send_inventory(tx: mpsc::Sender<AgentMessage>, every: Duration) {
     let mut last: Option<Inventory> = None;
+    let mut last_pending: Option<PendingUpdates> = None;
     let mut tick = interval(every);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let inv = match inventory().await {
-            Ok(inv) => inv,
+        let (inv, pending) = match inventory().await {
+            Ok(collected) => collected,
             Err(e) => {
                 eprintln!("cannot collect Inventory: {e:#}");
                 continue;
             }
         };
-        if last
+        if !last
             .as_ref()
             .is_some_and(|prev| same_apart_from_time(prev, &inv))
         {
-            continue;
+            let m = message(agent_message::Message::Inventory(inv.clone()));
+            if tx.send(m).await.is_err() {
+                return; // Session closed.
+            }
+            last = Some(inv);
         }
-        if tx
-            .send(message(agent_message::Message::Inventory(inv.clone())))
-            .await
-            .is_err()
-        {
-            return; // Session closed.
+        if last_pending.as_ref() != Some(&pending) {
+            let m = message(agent_message::Message::PendingUpdates(pending.clone()));
+            if tx.send(m).await.is_err() {
+                return; // Session closed.
+            }
+            last_pending = Some(pending);
         }
-        last = Some(inv);
     }
 }
 
