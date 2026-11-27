@@ -53,11 +53,11 @@ A reusable, expiring secret tied to one Environment that authorizes Pairing. Ope
 _Avoid_: Enrollment key, invite
 
 **Alert**:
-An Endpoint's offline condition: opened when it has been Offline past its threshold, resolved when it is Online again. At most one is open per Endpoint, so one outage is one Alert. Has a severity (informational, warning or error; offline Alerts are warnings). An Operator can snooze an open Alert for 12 hours (it leaves the unhandled count, not the Alert), resolve it by hand (the Endpoint then gets no new Alert until it has been seen Online), and attach action notes: short one-line comments on what was done.
+A condition on an Endpoint that needs an Operator's attention, of one kind: offline (Offline past its threshold, resolved when it is Online again), behind (the Endpoint is Behind on Updates, resolved when it is Compliant again) or not back after reboot (an Update Install rebooted it and it did not return within 30 minutes, resolved when it does). At most one of each kind is open per Endpoint, so one outage is one Alert. Has a severity (informational, warning or error; offline and behind Alerts are warnings, not back after reboot is an error). An Operator can snooze an open Alert for 12 hours (it leaves the unhandled count, not the Alert), resolve it by hand (the Endpoint then gets no new Alert until it has been seen Online), and attach action notes: short one-line comments on what was done.
 _Avoid_: Incident, alarm
 
 **Notification**:
-A message to one Operator through one channel (the web UI, email, or both, chosen per recipient) about an Alert opening or resolving. Operators in the Environment's recipient list who can access it each get their own; email batches one check's changes in an Environment into a single digest.
+A message to one Operator through one channel (the web UI, email, or both, chosen per recipient) about an Alert of any kind opening or resolving. Operators in the Environment's recipient list who can access it each get their own; email batches one check's changes in an Environment into a single digest.
 _Avoid_: Alert (that is the condition, not the message)
 
 **Revoked**:
@@ -71,6 +71,10 @@ _Avoid_: Patch, package
 **Update Install**:
 An Operator's request to install Updates on one Endpoint, ending in a result per Update. Runs apart from the Agent so it outlives an Agent restart, and is never killed. Installing across an Environment creates one Update Install per Endpoint.
 _Avoid_: Patch job, deployment
+
+**Hold**:
+A rule that stops RustyRMM installing matching Updates on an Environment's Endpoints or on one Endpoint, until it is removed or expires. An Operator can still install a held Update by name.
+_Avoid_: Exclusion, deferral, pin
 
 **Inventory**:
 The descriptive snapshot of an Endpoint: hardware, OS, network and update status. Contrast with a Sample, which is a point-in-time measurement.
