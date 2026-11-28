@@ -116,6 +116,15 @@ impl AgentService for AgentApi {
         ingest::touch_last_seen(&self.pool, endpoint_id)
             .await
             .map_err(internal)?;
+        // An unconvertible boot time is treated as absent.
+        let boot_time = hello.boot_time.and_then(|t| {
+            chrono::DateTime::from_timestamp(t.seconds, u32::try_from(t.nanos).ok()?)
+        });
+        if let Some(boot_time) = boot_time {
+            ingest::set_boot_time(&self.pool, endpoint_id, boot_time)
+                .await
+                .map_err(internal)?;
+        }
 
         // The registry holds the only sender: when the Session is removed or replaced, the
         // outbound stream ends and the Agent sees its Session close.
@@ -514,10 +523,43 @@ mod tests {
     }
 
     fn hello(protocol_version: u32) -> AgentMessage {
+        hello_booted(protocol_version, None)
+    }
+
+    fn hello_booted(protocol_version: u32, boot_secs: Option<i64>) -> AgentMessage {
         msg(agent_message::Message::Hello(Hello {
             agent_version: "test".into(),
             protocol_version,
+            boot_time: boot_secs.map(|seconds| prost_types::Timestamp { seconds, nanos: 0 }),
         }))
+    }
+
+    async fn stored_boot_time(pool: &PgPool, ep: Uuid) -> Option<i64> {
+        let t: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT boot_time FROM endpoints WHERE id = $1")
+                .bind(ep)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        t.map(|t| t.timestamp())
+    }
+
+    #[sqlx::test]
+    async fn hello_boot_time_is_stored_overwritten_and_kept_when_absent(pool: PgPool) {
+        let h = start(pool).await;
+        let (ep, identity) = paired_endpoint(&h).await;
+        assert_eq!(stored_boot_time(&h.pool, ep).await, None);
+
+        for (first, expected) in [
+            (hello_booted(1, Some(1_700_000_000)), Some(1_700_000_000)),
+            (hello_booted(1, Some(1_700_100_000)), Some(1_700_100_000)),
+            (hello(1), Some(1_700_100_000)),
+        ] {
+            let (_tx, resp) = open(&h, identity.clone(), first).await;
+            let mut stream = resp.unwrap();
+            stream.message().await.unwrap().unwrap();
+            assert_eq!(stored_boot_time(&h.pool, ep).await, expected);
+        }
     }
 
     /// Opens a Session whose first message is `first`. Returns the Agent's sender and the

@@ -176,6 +176,7 @@ function Inventory({ endpoint }: { endpoint: Endpoint }) {
   const rows: [string, string][] = [
     ["Paired", when(endpoint.pairedAt)],
     ["Last seen", endpoint.online ? "now" : when(endpoint.lastSeenAt)],
+    ["Up since", endpoint.bootTime ? when(endpoint.bootTime) : ""],
   ];
   if (inv) {
     const os = inv.os;

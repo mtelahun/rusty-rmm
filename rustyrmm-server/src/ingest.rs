@@ -93,6 +93,20 @@ pub async fn touch_last_seen(pool: &PgPool, endpoint_id: Uuid) -> sqlx::Result<(
     Ok(())
 }
 
+/// Stores the boot time from a Hello; the latest Session wins.
+pub async fn set_boot_time(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+    boot_time: DateTime<Utc>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE endpoints SET boot_time = $1 WHERE id = $2")
+        .bind(boot_time)
+        .bind(endpoint_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 fn without_timestamp(mut inv: Inventory) -> Inventory {
     inv.collected_at = None;
     inv
